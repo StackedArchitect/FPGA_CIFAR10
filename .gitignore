@@ -1,0 +1,18 @@
+# Generated / large artifacts
+cifar10_dataset/
+**/data/
+**/weights/
+**/weights_*/
+*.mem
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.tar.gz
+*.gz
+*.npz
+*.npy
+*.h5
+*.xlsx
+*.lnk
+desktop.ini
