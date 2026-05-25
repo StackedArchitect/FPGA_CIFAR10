@@ -19,7 +19,7 @@
 //   Phase 3 (Conv4): read B (conv3)  → write A (conv4)
 //   Phase 4 (GAP):   read A (conv4)
 //
-// Total BRAM36: 116 (weights) + 16 (ping-pong) + 5 (conv_buf) = 137 / 140
+// Total BRAM36: 112 (weights) + 16 (ping-pong) + 5 (conv_buf) = 133 / 140
 //
 // Target: XC7Z020CLG484-1 @ 40 MHz
 //============================================================================

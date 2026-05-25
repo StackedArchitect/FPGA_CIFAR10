@@ -53,12 +53,12 @@ class Cutout:
 #
 # FPGA resource budget (XC7Z020, 140 BRAM36):
 #   Conv1 weights:   864    LUT-ROM (distributed)
-#   Conv2 weights:  18,432  18 BRAM36
-#   Conv3 weights:  36,864  36 BRAM36
-#   Conv4 weights:  36,864  36 BRAM36
-#   FC1 weights:    26,624  26 BRAM36
-#   FC2 weights:     2,960   3 BRAM36
-#   Buffers:                14 BRAM36
+#   Conv2 weights:  18,432  16 BRAM36 (4 partitioned channels × 4 blocks)
+#   Conv3 weights:  36,864  32 BRAM36 (4 partitioned channels × 8 blocks)
+#   Conv4 weights:  36,864  32 BRAM36 (4 partitioned channels × 8 blocks)
+#   FC1 weights:    26,624  32 BRAM36 (sequential 32K depth block)
+#   FC2 weights:     2,960   0 BRAM36 (distributed RAM)
+#   Buffers:                21 BRAM36 (16 ping-pong + 5 conv_buf)
 #   TOTAL:                 133 / 140 BRAM36  ✓
 #
 # Fixed-point: Q16.16 (32-bit, two's complement)
