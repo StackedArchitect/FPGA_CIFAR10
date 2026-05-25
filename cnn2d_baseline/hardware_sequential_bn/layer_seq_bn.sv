@@ -1,34 +1,39 @@
 `timescale 1ns / 1ps
 //============================================================================
-// Sequential FC Layer — Full-Precision + BatchNorm (CIFAR-10 Baseline)
+// Sequential FC Layer — Full-Precision + BatchNorm version
 //
-// Adapted from cnn2d_baseline/hardware_sequential_bn/layer_seq_bn.sv
-// with module rename. Logic is identical.
+// Changes from baseline (no BN):
+//   • New parameter HAS_BN (1 for FC1, 0 for FC2)
+//               Controls whether S_BN state is entered.
 //
-// Features:
-//   • HAS_BN parameter: 1 for FC1 (BN after MAC), 0 for FC2 (no BN)
-//   • Sequential MAC with 1 multiplier per neuron (time-shared)
-//   • Weight ROM via $readmemh (BRAM-inferred)
-//   • PAD=20 zero-padding convention
+//   • New ports: bn_scale [NUM_NEURONS-1:0][31:0]
+//               bn_shift [NUM_NEURONS-1:0][31:0]
+//               Q16.16 folded BN parameters per neuron.
 //
-// For CIFAR-10 baseline:
-//   FC1: NUM_NEURONS=256, LAYER_NEURON_WIDTH=103 (PAD+64+PAD-1)
-//        HAS_BN=1, cycles per neuron = 103 + 5 = 108
-//        Total: 108 × 256 = 27,648 cycles
-//   FC2: NUM_NEURONS=10,  LAYER_NEURON_WIDTH=295 (PAD+256+PAD-1)
-//        HAS_BN=0, cycles per neuron = 295 + 4 = 299
-//        Total: 299 × 10 = 2,990 cycles
+//   • New state S_BN (1 cycle, between S_DRAIN and S_STORE):
+//               Computes: bn_product_reg = (bn_scale × biased_q16) >>> 16
+//               Uses 1 DSP48, fired once per neuron (not per tap).
+//
+//   • S_DRAIN: at drain_cnt==1, registers biased_reg = acc + b[neuron_idx]
+//              then transitions to S_BN (or S_STORE if HAS_BN=0).
+//
+//   • S_STORE: uses final_result (BN output or raw biased) for ReLU + store.
+//
+// Cycle count per neuron:
+//   HAS_BN=1: LAYER_NEURON_WIDTH + 4 + 1(BN) = LAYER_NEURON_WIDTH + 5
+//     FC1: (239 + 5) × 32 = 7,808 cycles
+//   HAS_BN=0: LAYER_NEURON_WIDTH + 4 (same as baseline)
+//     FC2: ( 71 + 4) × 10 =   750 cycles
 //
 // Fixed-point: Q16.16
 //============================================================================
-(* KEEP_HIERARCHY = "yes" *) module layer_seq_cifar #(
-    parameter NUM_NEURONS        = 256,
-    parameter LAYER_NEURON_WIDTH = 103,    // Number of inputs − 1 (0-indexed)
-    parameter LAYER_BITS         = 31,     // Input data bit width
-    parameter B_BITS             = 31,     // Bias bit width
-    parameter HAS_BN             = 1,      // 1 = FC1 (BN after MAC), 0 = FC2
-    parameter FORCE_BRAM         = 1,      // 1 = BRAM for weights, 0 = distributed
-    parameter WEIGHT_FILE        = ""      // Path to .mem file for $readmemh
+module layer_seq_bn #(
+    parameter NUM_NEURONS        = 32,
+    parameter LAYER_NEURON_WIDTH = 239,   // Number of inputs − 1 (0-indexed)
+    parameter LAYER_BITS         = 31,    // Input data bit width
+    parameter B_BITS             = 31,    // Bias bit width
+    parameter HAS_BN             = 1,     // 1 = FC1 (BN after MAC), 0 = FC2 (no BN)
+    parameter WEIGHT_FILE        = ""     // Path to .mem file for $readmemh
 )(
     input  wire                           clk,
     input  wire                           rstn,
@@ -46,24 +51,13 @@
 );
 
     // ================================================================
-    //  Weight ROM — 1D flat array
-    //  FORCE_BRAM=1: BRAM (for large arrays like FC1: 26,624 entries)
-    //  FORCE_BRAM=0: distributed RAM (for small arrays like FC2: 2,960)
+    //  Weight ROM — 1D flat array, BRAM-inferred
     // ================================================================
     localparam NUM_INPUTS    = LAYER_NEURON_WIDTH + 1;
     localparam TOTAL_WEIGHTS = NUM_NEURONS * NUM_INPUTS;
 
-    generate
-        if (FORCE_BRAM) begin : gen_bram_w
-            (* ram_style = "block" *) reg signed [31:0] w_rom_bram [0:TOTAL_WEIGHTS-1];
-            initial $readmemh(WEIGHT_FILE, w_rom_bram);
-        end else begin : gen_dist_w
-            (* ram_style = "distributed" *) reg signed [31:0] w_rom_dist [0:TOTAL_WEIGHTS-1];
-            initial $readmemh(WEIGHT_FILE, w_rom_dist);
-        end
-    endgenerate
-
-    // w_addr is declared in the FSM section below
+    (* ram_style = "block" *) reg signed [31:0] w_rom [0:TOTAL_WEIGHTS-1];
+    initial $readmemh(WEIGHT_FILE, w_rom);
 
     // ================================================================
     //  FSM — 3 bits, 7 states (0-6)
@@ -72,7 +66,7 @@
     localparam S_FILL  = 3'd1;   // Pipeline priming (1 cycle)
     localparam S_MAC   = 3'd2;   // Multiply-accumulate
     localparam S_DRAIN = 3'd3;   // Drain 1-stage pipeline (2 cycles)
-    localparam S_BN    = 3'd4;   // BatchNorm multiply (HAS_BN=1 only)
+    localparam S_BN    = 3'd4;   // NEW: BatchNorm multiply (HAS_BN=1 only)
     localparam S_STORE = 3'd5;   // BN shift + ReLU + store
     localparam S_DONE  = 3'd6;
 
@@ -83,32 +77,20 @@
     reg [1:0]  drain_cnt;      // counts 0,1 during S_DRAIN
 
     // ================================================================
-    //  Datapath — registered weight/data read (single pipeline stage)
-    //  Combinational array read → register → multiply → accumulate
+    //  Datapath — registered BRAM read + registered data MUX
     //  Q16.16 multiply is combinational (1-stage pipeline).
     // ================================================================
     reg signed [31:0]          cur_weight;
     reg signed [LAYER_BITS:0]  cur_data;
 
-    // Combinational weight read from whichever array exists
-    wire signed [31:0] w_rom_combo;
-    generate
-        if (FORCE_BRAM) begin : gen_bram_rd
-            assign w_rom_combo = gen_bram_w.w_rom_bram[w_addr];
-        end else begin : gen_dist_rd
-            assign w_rom_combo = gen_dist_w.w_rom_dist[w_addr];
-        end
-    endgenerate
-
-    // Single register stage — same as original: cur_weight <= w_rom[w_addr]
     always @(posedge clk) begin
-        cur_weight <= w_rom_combo;
+        cur_weight <= w_rom[w_addr];
         cur_data   <= data_in[input_idx];
     end
 
     // Combinational Q16.16 multiply (accumulated via pipe_s1_valid)
     wire signed [LAYER_BITS+32:0] full_product;
-    (* use_dsp = "yes" *) assign full_product = cur_weight * cur_data;
+    assign full_product = cur_weight * cur_data;
 
     wire signed [LAYER_BITS+16:0] p1_product;
     assign p1_product = full_product >>> 16;
@@ -129,7 +111,7 @@
     reg signed [LAYER_BITS+24:0] acc;
 
     // ================================================================
-    //  BN registers
+    //  BN registers (NEW for BN variant)
     // ================================================================
     reg signed [LAYER_BITS+24:0] biased_reg;
     reg signed [LAYER_BITS+24:0] bn_product_reg;
@@ -188,6 +170,8 @@
                         acc <= acc + p1_product;
 
                     if (input_idx == LAYER_NEURON_WIDTH) begin
+                        // Last address just captured by stage 1;
+                        // advance w_addr past this neuron's weights.
                         w_addr    <= w_addr + 1;
                         drain_cnt <= 0;
                         state     <= S_DRAIN;
@@ -207,6 +191,7 @@
 
                     drain_cnt <= drain_cnt + 1;
                     if (drain_cnt == 2'd1) begin
+                        // acc is final — register biased value
                         biased_reg <= acc + $signed(b[neuron_idx]);
                         if (HAS_BN)
                             state <= S_BN;
@@ -216,12 +201,18 @@
                 end
 
                 // ---- BN multiply (HAS_BN=1 only) ----
+                //
+                //  bn_product_reg = (bn_scale × biased_q16) >>> 16
+                //
+                //  biased_q16 = biased_reg[31:0] — Q16.16 truncation.
+                //  Vivado infers 1 DSP48 here, fired once per neuron.
                 S_BN: begin
                     bn_product_reg <= ($signed(bn_scale[neuron_idx]) * biased_q16) >>> 16;
                     state          <= S_STORE;
                 end
 
                 // ---- Finalise + optional ReLU, store result ----
+                //  final_result = BN output (with BN) or raw biased (without BN)
                 S_STORE: begin
                     if (activation_function && final_result <= 0)
                         data_out[neuron_idx] <= {(LAYER_BITS+9){1'b0}};

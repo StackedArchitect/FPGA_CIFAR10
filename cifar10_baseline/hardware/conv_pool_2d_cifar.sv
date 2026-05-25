@@ -1,51 +1,24 @@
 `timescale 1ns / 1ps
 //============================================================================
-// Merged Conv2D + BN + ReLU + MaxPool2D — Parallel-filter group processing
+// Conv2D + BatchNorm + Optional MaxPool — CIFAR-10 (BRAM Interface)
 //
-// CIFAR-10 Baseline: combines parallel computation (from hardware_parallel)
-// with BatchNorm (from hardware_sequential_bn), adding:
-//   • Zero-padding support (PAD_SIZE parameter)
-//   • Group parallelism (PARALLEL_CH filters computed simultaneously)
-//   • Optional pooling (HAS_POOL parameter — Conv3 has no pool)
+// ARCHITECTURE CHANGE: Feature maps use BRAM-based address/data ports
+// instead of full unpacked array ports.
+//   - Input:  fm_rd_addr (output) / fm_rd_data (input) — reads from parent BRAM
+//   - Output: fm_wr_addr, fm_wr_data, fm_wr_en — writes to parent BRAM
 //
-// Group processing:
-//   OUT_CH filters are divided into NUM_GROUPS = OUT_CH / PARALLEL_CH groups.
-//   Each group processes PARALLEL_CH filters simultaneously using PARALLEL_CH
-//   multipliers. Groups are iterated sequentially.
+// This eliminates hundreds of thousands of flip-flops that were needed
+// for the old unpacked array ports (e.g., 8192 × 32 = 262K FFs per layer).
 //
-// Padding:
-//   PAD_SIZE=1 (same-padding for 3×3 kernel) preserves spatial dimensions:
-//     CONV_OUT_H = IN_H + 2*PAD_SIZE - KERNEL_H + 1 = IN_H  (when pad=1, k=3)
-//   Out-of-bounds positions read zero instead of data_in.
-//
-// BN (always included):
-//   After drain, each filter's accumulated value is bias-added, then:
-//     bn_product = (bn_scale × biased_q16) >>> 16
-//     bn_result  = bn_product + bn_shift
-//   Then ReLU applied. Uses 1 DSP48 (time-shared across store_cnt).
-//
-// State flow per group:
-//   S_IDLE → S_CONV_COMPUTE (PARALLEL_CH multipliers) → S_CONV_DRAIN (2 cyc)
-//   → S_CONV_BN / S_CONV_STORE loop (2 cycles × PARALLEL_CH filters)
-//   → [next position → S_CONV_COMPUTE]
-//   → [all positions, HAS_POOL=1 → S_POOL_COMPARE → S_POOL_STORE]
-//   → [all positions, HAS_POOL=0, more groups → S_CONV_COMPUTE]
-//   → [all done → S_DONE]
-//
-// Conv1: IN=32×32×3,  OUT_CH=32, PARALLEL_CH=16 → 2 groups, HAS_POOL=1
-//   TAP=27, per-pos=27+2+32=61 cyc, conv=1024×61×2=124,928, pool=2×16×256×5=40,960
-//   Total ≈ 165,888 cycles
-// Conv2: IN=16×16×32, OUT_CH=64, PARALLEL_CH=16 → 4 groups, HAS_POOL=1
-//   TAP=288, per-pos=288+2+32=322 cyc, conv=256×322×4=329,728, pool=4×16×64×5=20,480
-//   Total ≈ 350,208 cycles
-// Conv3: IN=8×8×64,   OUT_CH=64, PARALLEL_CH=16 → 4 groups, HAS_POOL=0
-//   TAP=576, per-pos=576+2+32=610 cyc, conv=64×610×4=156,160
-//   Total ≈ 156,160 cycles
+// Pipeline timing:
+//   fm_rd_addr is driven combinationally. Parent BRAM output (fm_rd_data)
+//   arrives 1 cycle later — same latency as the internal w_rom BRAM read
+//   for p1_weight. Both are available on the same clock edge.
 //
 // Fixed-point: Q16.16
 // Target: XC7Z020CLG484-1 @ 40 MHz
 //============================================================================
-module conv_pool_2d_cifar #(
+(* KEEP_HIERARCHY = "yes" *) module conv_pool_2d_cifar #(
     parameter IN_H        = 32,
     parameter IN_W        = 32,
     parameter IN_CH       = 3,
@@ -61,28 +34,53 @@ module conv_pool_2d_cifar #(
     parameter CONV_OUT_W  = IN_W + 2*PAD_SIZE - KERNEL_W + 1,
     parameter POOL_OUT_H  = CONV_OUT_H / POOL_H,
     parameter POOL_OUT_W  = CONV_OUT_W / POOL_W,
-    parameter BITS        = 31
+    parameter BITS        = 31,
+
+    // Weight/BN file paths — loaded via $readmemh into internal ROMs.
+    parameter WEIGHT_FILE   = "",
+    parameter BIAS_FILE     = "",
+    parameter BN_SCALE_FILE = "",
+    parameter BN_SHIFT_FILE = ""
 )(
     input  wire                     clk,
     input  wire                     rstn,
     input  wire                     activation_function,
 
-    input  wire signed [BITS:0]     data_in  [0 : IN_H * IN_W * IN_CH - 1],
-    input  wire signed [31:0]       weights  [0 : OUT_CH * IN_CH * KERNEL_H * KERNEL_W - 1],
-    input  wire signed [31:0]       bias     [0 : OUT_CH - 1],
+    // BRAM read port — reads from previous layer's feature map
+    output wire [31:0]              fm_rd_addr,
+    input  wire signed [BITS:0]     fm_rd_data,
 
-    // Folded BN parameters (Q16.16 per output channel)
-    input  wire signed [31:0]       bn_scale [0 : OUT_CH - 1],
-    input  wire signed [31:0]       bn_shift [0 : OUT_CH - 1],
+    // BRAM write port — writes to this layer's feature map
+    output reg  [31:0]              fm_wr_addr,
+    output reg  signed [BITS:0]     fm_wr_data,
+    output reg                      fm_wr_en,
 
-    output reg  signed [BITS:0]     data_out [0 : OUT_CH * (HAS_POOL ? (POOL_OUT_H * POOL_OUT_W) : (CONV_OUT_H * CONV_OUT_W)) - 1],
     output reg                      done
 );
+
+    // ================================================================
+    //  Internal weight/BN ROMs (file-loaded)
+    // ================================================================
+    localparam TOTAL_W = OUT_CH * IN_CH * KERNEL_H * KERNEL_W;
+
+    // Bias ROM (forced distributed — max 64 entries, saves BRAM)
+    (* ram_style = "distributed" *) reg signed [31:0] b_rom [0 : OUT_CH - 1];
+    initial $readmemh(BIAS_FILE, b_rom);
+
+    // BN scale ROM (forced distributed)
+    (* ram_style = "distributed" *) reg signed [31:0] bns_rom [0 : OUT_CH - 1];
+    initial $readmemh(BN_SCALE_FILE, bns_rom);
+
+    // BN shift ROM (forced distributed)
+    (* ram_style = "distributed" *) reg signed [31:0] bnsh_rom [0 : OUT_CH - 1];
+    initial $readmemh(BN_SHIFT_FILE, bnsh_rom);
 
     // ================================================================
     //  Constants
     // ================================================================
     localparam TAP_COUNT      = IN_CH * KERNEL_H * KERNEL_W;
+    localparam SUB_W_SIZE     = TOTAL_W / PARALLEL_CH;
+
     localparam CONV_POSITIONS = CONV_OUT_H * CONV_OUT_W;
     localparam POOL_OUT_POS   = POOL_OUT_H * POOL_OUT_W;
     localparam POOL_ELEMENTS  = POOL_H * POOL_W;
@@ -91,14 +89,12 @@ module conv_pool_2d_cifar #(
 
     // ================================================================
     //  Conv buffer — PARALLEL_CH filters (reused per group)
-    //  Conv1: 16 × 1024 × 32 = 524,288 bits → ~15 BRAM36
-    //  Conv2: 16 × 256  × 32 = 131,072 bits → ~4  BRAM36
-    //  Conv3: not used (HAS_POOL=0, write direct to data_out)
+    //  Only used when HAS_POOL=1 for intermediate conv results.
     // ================================================================
     (* ram_style = "block" *) reg signed [BITS:0] conv_buf [0 : PARALLEL_CH * CONV_POSITIONS - 1];
 
     // ================================================================
-    //  State machine — 4 bits (8 states)
+    //  State machine
     // ================================================================
     localparam S_IDLE         = 4'd0;
     localparam S_CONV_COMPUTE = 4'd1;
@@ -134,7 +130,7 @@ module conv_pool_2d_cifar #(
     // ================================================================
     //  Pool counters
     // ================================================================
-    reg [31:0] filter_idx;   // 0..PARALLEL_CH-1 within group (for pool)
+    reg [31:0] filter_idx;
     reg [31:0] pool_out_row;
     reg [31:0] pool_out_col;
     reg [31:0] pool_pos;
@@ -144,9 +140,6 @@ module conv_pool_2d_cifar #(
 
     // ================================================================
     //  Padding — compute actual input coordinates
-    //  conv_out_row + kr_cnt is the position in the padded input.
-    //  Subtract PAD_SIZE to get actual input coordinate.
-    //  If out of bounds, use zero.
     // ================================================================
     wire [31:0] pad_row_sum;
     wire [31:0] pad_col_sum;
@@ -169,33 +162,91 @@ module conv_pool_2d_cifar #(
     assign tap_idx = ch_cnt * (KERNEL_H * KERNEL_W) + kr_cnt * KERNEL_W + kc_cnt;
 
     // ================================================================
+    //  BRAM read address — driven combinationally
+    //  Parent BRAM will latch this on the next posedge and output
+    //  fm_rd_data one cycle later.
+    // ================================================================
+    assign fm_rd_addr = data_idx;
+
+    // ================================================================
+    //  Delayed in_bounds — matches BRAM read latency
+    //  fm_rd_data arrives 1 cycle after fm_rd_addr is set.
+    //  in_bounds_d tells us whether that data is valid.
+    // ================================================================
+    reg in_bounds_d;
+    always @(posedge clk) begin
+        if (!rstn)
+            in_bounds_d <= 1'b0;
+        else
+            in_bounds_d <= in_bounds;
+    end
+
+    // ================================================================
+    //  Input data mux — uses BRAM output directly (no re-register)
+    //  This replaces the old p1_data register.
+    //  fm_rd_data and p1_weight are both registered BRAM outputs
+    //  available on the same clock edge — pipeline is preserved.
+    // ================================================================
+    wire signed [BITS:0] p1_data_mux;
+    assign p1_data_mux = in_bounds_d ? fm_rd_data : {(BITS+1){1'b0}};
+
+    // ================================================================
     //  Parallel-filter datapath — 1-stage pipeline
     //  PARALLEL_CH multipliers active simultaneously.
     //  Shared input data, per-filter weights.
     // ================================================================
-
-    // Stage 1: Register shared data value (with padding)
-    reg signed [BITS:0] p1_data;
-    always @(posedge clk) begin
-        if (in_bounds)
-            p1_data <= data_in[data_idx];
-        else
-            p1_data <= {(BITS+1){1'b0}};
-    end
 
     // Per-filter: registered weight + combinational multiply
     reg  signed [31:0]      p1_weight      [0 : PARALLEL_CH - 1];
     wire signed [BITS+32:0] p1_full_product [0 : PARALLEL_CH - 1];
     wire signed [BITS+16:0] p1_product     [0 : PARALLEL_CH - 1];
 
-    genvar gf;
     generate
-        for (gf = 0; gf < PARALLEL_CH; gf = gf + 1) begin : gen_filter_pipe
-            always @(posedge clk) begin
-                p1_weight[gf] <= weights[(group_base + gf) * TAP_COUNT + tap_idx];
+        if (PARALLEL_CH == 4) begin : gen_par_4
+            // We use separate 1D arrays to bypass Vivado's 1,000,000 bit limit on 2D arrays during elaboration.
+            (* ram_style = "block" *) reg signed [31:0] w_rom_split_0 [0 : SUB_W_SIZE - 1];
+            (* ram_style = "block" *) reg signed [31:0] w_rom_split_1 [0 : SUB_W_SIZE - 1];
+            (* ram_style = "block" *) reg signed [31:0] w_rom_split_2 [0 : SUB_W_SIZE - 1];
+            (* ram_style = "block" *) reg signed [31:0] w_rom_split_3 [0 : SUB_W_SIZE - 1];
+
+            reg signed [31:0] w_rom_flat [0 : TOTAL_W - 1];
+
+            integer wi;
+            initial begin
+                $readmemh(WEIGHT_FILE, w_rom_flat);
+                for (wi = 0; wi < SUB_W_SIZE; wi = wi + 1) begin
+                    w_rom_split_0[wi] = w_rom_flat[((wi / TAP_COUNT) * 4 + 0) * TAP_COUNT + (wi % TAP_COUNT)];
+                    w_rom_split_1[wi] = w_rom_flat[((wi / TAP_COUNT) * 4 + 1) * TAP_COUNT + (wi % TAP_COUNT)];
+                    w_rom_split_2[wi] = w_rom_flat[((wi / TAP_COUNT) * 4 + 2) * TAP_COUNT + (wi % TAP_COUNT)];
+                    w_rom_split_3[wi] = w_rom_flat[((wi / TAP_COUNT) * 4 + 3) * TAP_COUNT + (wi % TAP_COUNT)];
+                end
             end
-            assign p1_full_product[gf] = p1_weight[gf] * p1_data;
-            assign p1_product[gf]      = p1_full_product[gf] >>> 16;
+
+            genvar gf;
+            for (gf = 0; gf < 4; gf = gf + 1) begin : gen_filter_pipe
+                always @(posedge clk) begin
+                    if (gf == 0) p1_weight[0] <= w_rom_split_0[group_idx * TAP_COUNT + tap_idx];
+                    else if (gf == 1) p1_weight[1] <= w_rom_split_1[group_idx * TAP_COUNT + tap_idx];
+                    else if (gf == 2) p1_weight[2] <= w_rom_split_2[group_idx * TAP_COUNT + tap_idx];
+                    else if (gf == 3) p1_weight[3] <= w_rom_split_3[group_idx * TAP_COUNT + tap_idx];
+                end
+                (* use_dsp = "yes" *) assign p1_full_product[gf] = p1_weight[gf] * p1_data_mux;
+                assign p1_product[gf]      = p1_full_product[gf] >>> 16;
+            end
+        end else begin : gen_par_generic
+            // Fallback to monolithic ROM if PARALLEL_CH is not 4
+            // (Uses distributed RAM / LUTs for storage if PARALLEL_CH > 2, but compiles successfully)
+            reg signed [31:0] w_rom [0 : TOTAL_W - 1];
+            initial $readmemh(WEIGHT_FILE, w_rom);
+
+            genvar gf;
+            for (gf = 0; gf < PARALLEL_CH; gf = gf + 1) begin : gen_filter_pipe
+                always @(posedge clk) begin
+                    p1_weight[gf] <= w_rom[(group_base + gf) * TAP_COUNT + tap_idx];
+                end
+                (* use_dsp = "yes" *) assign p1_full_product[gf] = p1_weight[gf] * p1_data_mux;
+                assign p1_product[gf]      = p1_full_product[gf] >>> 16;
+            end
         end
     endgenerate
 
@@ -229,7 +280,7 @@ module conv_pool_2d_cifar #(
 
     // BN result (combinational)
     wire signed [BITS+24:0] bn_result;
-    assign bn_result = bn_product_reg + $signed(bn_shift[global_store_filt]);
+    assign bn_result = bn_product_reg + $signed(bnsh_rom[global_store_filt]);
 
     // Drain counter
     reg [1:0] drain_cnt;
@@ -277,8 +328,12 @@ module conv_pool_2d_cifar #(
             cur_max        <= {1'b1, {BITS{1'b0}}};
             done           <= 0;
             drain_cnt      <= 0;
+            fm_wr_addr     <= 0;
+            fm_wr_data     <= 0;
+            fm_wr_en       <= 0;
         end else begin
-            done <= 0;
+            done     <= 0;
+            fm_wr_en <= 0;  // Default: no write
 
             case (state)
 
@@ -325,8 +380,6 @@ module conv_pool_2d_cifar #(
 
                 // ==================================================
                 //  CONV DRAIN: Flush 1-stage pipeline (2 cycles).
-                //  At drain_cnt==1: acc is final, register biased
-                //  for filter 0 in group, start BN loop.
                 // ==================================================
                 S_CONV_DRAIN: begin
                     if (pipe_s1_valid) begin
@@ -336,26 +389,23 @@ module conv_pool_2d_cifar #(
                     drain_cnt <= drain_cnt + 1;
                     if (drain_cnt == 2'd1) begin
                         store_cnt  <= 0;
-                        biased_reg <= acc[0] + $signed(bias[group_base]);
+                        biased_reg <= acc[0] + $signed(b_rom[group_base]);
                         state      <= S_CONV_BN;
                     end
                 end
 
                 // ==================================================
                 //  CONV BN: Folded BatchNorm multiply (1 cycle)
-                //  Processes one filter at a time via store_cnt.
-                //  bn_product = (bn_scale × biased_q16) >>> 16
                 // ==================================================
                 S_CONV_BN: begin
-                    bn_product_reg <= ($signed(bn_scale[global_store_filt]) * biased_q16) >>> 16;
+                    bn_product_reg <= ($signed(bns_rom[global_store_filt]) * biased_q16) >>> 16;
                     state          <= S_CONV_STORE;
                 end
 
                 // ==================================================
                 //  CONV STORE: BN shift + ReLU + store (1 cycle)
-                //  If HAS_POOL: store to conv_buf
-                //  If !HAS_POOL: store directly to data_out
-                //  Then advance to next filter or next position.
+                //  If HAS_POOL: store to internal conv_buf
+                //  If !HAS_POOL: write to parent BRAM via fm_wr_*
                 // ==================================================
                 S_CONV_STORE: begin
                     // BN shift + ReLU + store
@@ -363,36 +413,41 @@ module conv_pool_2d_cifar #(
                         if (bn_result > 0) begin
                             if (HAS_POOL)
                                 conv_buf[store_cnt * CONV_POSITIONS + conv_pos] <= bn_result[BITS:0];
-                            else
-                                data_out[global_store_filt * CONV_POSITIONS + conv_pos] <= bn_result[BITS:0];
+                            else begin
+                                fm_wr_addr <= global_store_filt * CONV_POSITIONS + conv_pos;
+                                fm_wr_data <= bn_result[BITS:0];
+                                fm_wr_en   <= 1;
+                            end
                         end else begin
                             if (HAS_POOL)
                                 conv_buf[store_cnt * CONV_POSITIONS + conv_pos] <= 0;
-                            else
-                                data_out[global_store_filt * CONV_POSITIONS + conv_pos] <= 0;
+                            else begin
+                                fm_wr_addr <= global_store_filt * CONV_POSITIONS + conv_pos;
+                                fm_wr_data <= 0;
+                                fm_wr_en   <= 1;
+                            end
                         end
                     end else begin
                         if (HAS_POOL)
                             conv_buf[store_cnt * CONV_POSITIONS + conv_pos] <= bn_result[BITS:0];
-                        else
-                            data_out[global_store_filt * CONV_POSITIONS + conv_pos] <= bn_result[BITS:0];
+                        else begin
+                            fm_wr_addr <= global_store_filt * CONV_POSITIONS + conv_pos;
+                            fm_wr_data <= bn_result[BITS:0];
+                            fm_wr_en   <= 1;
+                        end
                     end
 
                     if (store_cnt < PARALLEL_CH - 1) begin
-                        // Next filter in group — register biased for next
                         biased_reg <= acc[store_cnt + 1]
-                                    + $signed(bias[group_base + store_cnt + 1]);
+                                    + $signed(b_rom[group_base + store_cnt + 1]);
                         store_cnt  <= store_cnt + 1;
                         state      <= S_CONV_BN;
                     end else begin
-                        // All PARALLEL_CH filters stored for this position
                         for (i = 0; i < PARALLEL_CH; i = i + 1)
                             acc[i] <= 0;
 
                         if (conv_pos == CONV_POSITIONS - 1) begin
-                            // All conv positions done for this group
                             if (HAS_POOL) begin
-                                // Start pooling for this group
                                 filter_idx   <= 0;
                                 pool_out_row <= 0;
                                 pool_out_col <= 0;
@@ -403,7 +458,6 @@ module conv_pool_2d_cifar #(
                                 cur_max      <= {1'b1, {BITS{1'b0}}};
                                 state        <= S_POOL_COMPARE;
                             end else begin
-                                // No pool — check for more groups
                                 if (group_idx < NUM_GROUPS - 1) begin
                                     group_idx    <= group_idx + 1;
                                     conv_out_row <= 0;
@@ -417,7 +471,6 @@ module conv_pool_2d_cifar #(
                                     state <= S_DONE;
                             end
                         end else begin
-                            // Next conv output position
                             conv_pos <= conv_pos + 1;
                             if (conv_out_col == CONV_OUT_W - 1) begin
                                 conv_out_col <= 0;
@@ -431,8 +484,7 @@ module conv_pool_2d_cifar #(
 
                 // ==================================================
                 //  POOL COMPARE — Max over POOL_H × POOL_W window
-                //  Processes one filter at a time (filter_idx within
-                //  the current group, 0..PARALLEL_CH-1).
+                //  Reads from internal conv_buf (BRAM).
                 // ==================================================
                 S_POOL_COMPARE: begin
                     if ($signed(conv_buf[pool_read_addr]) > $signed(cur_max))
@@ -454,15 +506,16 @@ module conv_pool_2d_cifar #(
                 end
 
                 // ==================================================
-                //  POOL STORE — Write max to data_out at global index
+                //  POOL STORE — Write max to parent BRAM
                 // ==================================================
                 S_POOL_STORE: begin
-                    data_out[(group_base + filter_idx) * POOL_OUT_POS + pool_pos] <= cur_max;
-                    cur_max <= {1'b1, {BITS{1'b0}}};
+                    fm_wr_addr <= (group_base + filter_idx) * POOL_OUT_POS + pool_pos;
+                    fm_wr_data <= cur_max;
+                    fm_wr_en   <= 1;
+                    cur_max    <= {1'b1, {BITS{1'b0}}};
 
                     if (pool_pos == POOL_OUT_POS - 1) begin
                         if (filter_idx == PARALLEL_CH - 1) begin
-                            // All filters in this group pooled
                             if (group_idx < NUM_GROUPS - 1) begin
                                 group_idx    <= group_idx + 1;
                                 conv_out_row <= 0;

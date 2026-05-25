@@ -282,7 +282,7 @@ train_transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.4914, 0.4822, 0.4465),
                           (0.2470, 0.2435, 0.2616)),
-    Cutout(n_holes=1, length=16),   # Regularize: mask 16×16 patch (25% of image)
+    Cutout(n_holes=1, length=10),   # Regularize: mask 10×10 patch (10% of image)
 ])
 
 test_transform = transforms.Compose([
@@ -381,7 +381,7 @@ teacher.eval()
 # ===========================================================================
 #  PHASE 2: Student with KD (4-layer CNN)
 # ===========================================================================
-STUDENT_EPOCHS = 350
+STUDENT_EPOCHS = 400
 
 print(f"\n{'='*70}")
 print(f"  [PHASE 2] Training 4-Layer Student with KD ({STUDENT_EPOCHS} epochs)")

@@ -62,7 +62,7 @@ module tb_cnn2d_cifar;
     parameter FC2_OUT       = 10;
     parameter PAD           = 20;
 
-    parameter PARALLEL_CH   = 16;
+    parameter PARALLEL_CH   = 4;
 
     parameter FC1_WIDTH     = PAD + FC1_IN + PAD - 1;       // 103
     parameter FC2_WIDTH     = PAD + FC1_OUT + PAD - 1;      // 295
@@ -72,7 +72,7 @@ module tb_cnn2d_cifar;
 
     // Timing
     parameter CLK_PERIOD_NS   = 10;
-    parameter SIM_DURATION_NS = 20_000_000;  // 20 ms — generous for 4 conv layers
+    parameter SIM_DURATION_NS = 80_000_000;  // 80 ms — generous for PARALLEL_CH=4
 
     // ---- Weight array sizes ----
     localparam CONV1_W_SIZE = CONV1_OUT_CH * INPUT_CH    * CONV1_KERNEL * CONV1_KERNEL;  // 864
@@ -83,37 +83,6 @@ module tb_cnn2d_cifar;
     // ---- DUT signals ----
     reg  clk;
     reg  rstn;
-
-    // Input image — 32×32×3 = 3072 Q16.16 values (channel-first)
-    reg signed [31:0] data_in [0 : INPUT_H * INPUT_W * INPUT_CH - 1];
-
-    // Conv2D weights & biases
-    reg signed [31:0] conv1_w [0 : CONV1_W_SIZE - 1];
-    reg signed [31:0] conv1_b [0 : CONV1_OUT_CH - 1];
-    reg signed [31:0] conv2_w [0 : CONV2_W_SIZE - 1];
-    reg signed [31:0] conv2_b [0 : CONV2_OUT_CH - 1];
-    reg signed [31:0] conv3_w [0 : CONV3_W_SIZE - 1];
-    reg signed [31:0] conv3_b [0 : CONV3_OUT_CH - 1];
-    reg signed [31:0] conv4_w [0 : CONV4_W_SIZE - 1];
-    reg signed [31:0] conv4_b [0 : CONV4_OUT_CH - 1];
-
-    // BatchNorm parameters (Q16.16 per channel)
-    reg signed [31:0] conv1_bn_scale [0 : CONV1_OUT_CH - 1];
-    reg signed [31:0] conv1_bn_shift [0 : CONV1_OUT_CH - 1];
-    reg signed [31:0] conv2_bn_scale [0 : CONV2_OUT_CH - 1];
-    reg signed [31:0] conv2_bn_shift [0 : CONV2_OUT_CH - 1];
-    reg signed [31:0] conv3_bn_scale [0 : CONV3_OUT_CH - 1];
-    reg signed [31:0] conv3_bn_shift [0 : CONV3_OUT_CH - 1];
-    reg signed [31:0] conv4_bn_scale [0 : CONV4_OUT_CH - 1];
-    reg signed [31:0] conv4_bn_shift [0 : CONV4_OUT_CH - 1];
-
-    // FC biases (weights loaded internally by layer_seq_cifar)
-    reg signed [31:0] fc1_b [0 : FC1_OUT - 1];
-    reg signed [31:0] fc2_b [0 : FC2_OUT - 1];
-
-    // FC1 BatchNorm parameters (BN5)
-    reg signed [31:0] fc1_bn_scale [0 : FC1_OUT - 1];
-    reg signed [31:0] fc1_bn_shift [0 : FC1_OUT - 1];
 
     // Output
     wire signed [BITS+16:0] cnn_out [0 : FC2_OUT - 1];
@@ -143,33 +112,37 @@ module tb_cnn2d_cifar;
         .PAD          (PAD),
         .PARALLEL_CH  (PARALLEL_CH),
         .BITS         (BITS),
-        .FC1_WEIGHT_FILE("fc1_w.mem"),
-        .FC2_WEIGHT_FILE("fc2_w.mem")
+        // FC weight files
+        .FC1_WEIGHT_FILE    ("fc1_w.mem"),
+        .FC2_WEIGHT_FILE    ("fc2_w.mem"),
+        // Conv weight/bias/BN files
+        .CONV1_WEIGHT_FILE  ("conv1_w.mem"),
+        .CONV1_BIAS_FILE    ("conv1_b.mem"),
+        .CONV1_BN_SCALE_FILE("conv1_bn_scale.mem"),
+        .CONV1_BN_SHIFT_FILE("conv1_bn_shift.mem"),
+        .CONV2_WEIGHT_FILE  ("conv2_w.mem"),
+        .CONV2_BIAS_FILE    ("conv2_b.mem"),
+        .CONV2_BN_SCALE_FILE("conv2_bn_scale.mem"),
+        .CONV2_BN_SHIFT_FILE("conv2_bn_shift.mem"),
+        .CONV3_WEIGHT_FILE  ("conv3_w.mem"),
+        .CONV3_BIAS_FILE    ("conv3_b.mem"),
+        .CONV3_BN_SCALE_FILE("conv3_bn_scale.mem"),
+        .CONV3_BN_SHIFT_FILE("conv3_bn_shift.mem"),
+        .CONV4_WEIGHT_FILE  ("conv4_w.mem"),
+        .CONV4_BIAS_FILE    ("conv4_b.mem"),
+        .CONV4_BN_SCALE_FILE("conv4_bn_scale.mem"),
+        .CONV4_BN_SHIFT_FILE("conv4_bn_shift.mem"),
+        // FC bias/BN files
+        .FC1_BIAS_FILE      ("fc1_b.mem"),
+        .FC2_BIAS_FILE      ("fc2_b.mem"),
+        .FC1_BN_SCALE_FILE  ("fc1_bn_scale.mem"),
+        .FC1_BN_SHIFT_FILE  ("fc1_bn_shift.mem"),
+        // Input image file
+        .DATA_IN_FILE       ("data_in.mem")
     ) dut (
-        .clk             (clk),
-        .rstn            (rstn),
-        .data_in         (data_in),
-        .conv1_w         (conv1_w),
-        .conv1_b         (conv1_b),
-        .conv2_w         (conv2_w),
-        .conv2_b         (conv2_b),
-        .conv3_w         (conv3_w),
-        .conv3_b         (conv3_b),
-        .conv4_w         (conv4_w),
-        .conv4_b         (conv4_b),
-        .conv1_bn_scale  (conv1_bn_scale),
-        .conv1_bn_shift  (conv1_bn_shift),
-        .conv2_bn_scale  (conv2_bn_scale),
-        .conv2_bn_shift  (conv2_bn_shift),
-        .conv3_bn_scale  (conv3_bn_scale),
-        .conv3_bn_shift  (conv3_bn_shift),
-        .conv4_bn_scale  (conv4_bn_scale),
-        .conv4_bn_shift  (conv4_bn_shift),
-        .fc1_b           (fc1_b),
-        .fc2_b           (fc2_b),
-        .fc1_bn_scale    (fc1_bn_scale),
-        .fc1_bn_shift    (fc1_bn_shift),
-        .cnn_out         (cnn_out)
+        .clk     (clk),
+        .rstn    (rstn),
+        .cnn_out (cnn_out)
     );
 
     // ---- Clock ----
@@ -249,76 +222,9 @@ module tb_cnn2d_cifar;
         $display("  Parallelism:  %0d filters per group", PARALLEL_CH);
         $display("============================================================\n");
 
-        // ---- Load conv2d weights ----
-        $display("[INFO] Loading Conv1 weights (conv1_w.mem) -- %0d entries ...",
-                 CONV1_W_SIZE);
-        $readmemh("conv1_w.mem", conv1_w);
-
-        $display("[INFO] Loading Conv1 biases (conv1_b.mem) -- %0d entries ...",
-                 CONV1_OUT_CH);
-        $readmemh("conv1_b.mem", conv1_b);
-
-        $display("[INFO] Loading Conv2 weights (conv2_w.mem) -- %0d entries ...",
-                 CONV2_W_SIZE);
-        $readmemh("conv2_w.mem", conv2_w);
-
-        $display("[INFO] Loading Conv2 biases (conv2_b.mem) -- %0d entries ...",
-                 CONV2_OUT_CH);
-        $readmemh("conv2_b.mem", conv2_b);
-
-        $display("[INFO] Loading Conv3 weights (conv3_w.mem) -- %0d entries ...",
-                 CONV3_W_SIZE);
-        $readmemh("conv3_w.mem", conv3_w);
-
-        $display("[INFO] Loading Conv3 biases (conv3_b.mem) -- %0d entries ...",
-                 CONV3_OUT_CH);
-        $readmemh("conv3_b.mem", conv3_b);
-
-        $display("[INFO] Loading Conv4 weights (conv4_w.mem) -- %0d entries ...",
-                 CONV4_W_SIZE);
-        $readmemh("conv4_w.mem", conv4_w);
-
-        $display("[INFO] Loading Conv4 biases (conv4_b.mem) -- %0d entries ...",
-                 CONV4_OUT_CH);
-        $readmemh("conv4_b.mem", conv4_b);
-
-        // ---- Load BatchNorm parameters ----
-        $display("[INFO] Loading Conv1 BN scale/shift -- %0d channels ...",
-                 CONV1_OUT_CH);
-        $readmemh("conv1_bn_scale.mem", conv1_bn_scale);
-        $readmemh("conv1_bn_shift.mem", conv1_bn_shift);
-
-        $display("[INFO] Loading Conv2 BN scale/shift -- %0d channels ...",
-                 CONV2_OUT_CH);
-        $readmemh("conv2_bn_scale.mem", conv2_bn_scale);
-        $readmemh("conv2_bn_shift.mem", conv2_bn_shift);
-
-        $display("[INFO] Loading Conv3 BN scale/shift -- %0d channels ...",
-                 CONV3_OUT_CH);
-        $readmemh("conv3_bn_scale.mem", conv3_bn_scale);
-        $readmemh("conv3_bn_shift.mem", conv3_bn_shift);
-
-        $display("[INFO] Loading Conv4 BN scale/shift -- %0d channels ...",
-                 CONV4_OUT_CH);
-        $readmemh("conv4_bn_scale.mem", conv4_bn_scale);
-        $readmemh("conv4_bn_shift.mem", conv4_bn_shift);
-
-        // ---- Load FC biases + BN ----
-        $display("[INFO] Loading FC1 biases (fc1_b.mem) -- %0d biases ...", FC1_OUT);
-        $readmemh("fc1_b.mem", fc1_b);
-
-        $display("[INFO] Loading FC1 BN scale/shift -- %0d neurons ...", FC1_OUT);
-        $readmemh("fc1_bn_scale.mem", fc1_bn_scale);
-        $readmemh("fc1_bn_shift.mem", fc1_bn_shift);
-
-        $display("[INFO] Loading FC2 biases (fc2_b.mem) -- %0d biases ...", FC2_OUT);
-        $readmemh("fc2_b.mem", fc2_b);
-
-        // ---- Load input & label ----
-        $display("[INFO] Loading input data (data_in.mem) -- %0d pixels (3x32x32) ...",
-                 INPUT_H * INPUT_W * INPUT_CH);
-        $readmemh("data_in.mem", data_in);
-
+        // ---- Load expected label ----
+        // Note: All weights, biases, BN parameters, and input data are loaded
+        //       internally by cnn2d_top_cifar and sub-modules via file path parameters.
         $display("[INFO] Loading expected label (expected_label.mem) ...");
         $readmemh("expected_label.mem", expected_label_arr);
         expected_label = expected_label_arr[0];
