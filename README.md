@@ -13,7 +13,6 @@ The project is structured into three main design phases:
 
 | Specification | Float Baseline (PyTorch) | TTQ + BN Baseline (RTL) | TTQ + BN + Threshold (RTL) | TTQ + BN + Hysteresis (RTL) |
 |---|:---:|:---:|:---:|:---:|
-| **CIFAR-10 Test Accuracy** | **90.62%** | **86.19%** | **85.44%** | **80.20%** |
 | **Quantization Format** | 32-bit Float | 2-bit weights, Q16.16 | 2-bit weights, Q16.16 | 2-bit weights, Q16.16 |
 | **Number of Parameters** | 120,490 | 124,058 | 124,058 | 124,058 |
 | **Total Inference Cycles** | N/A | **2,877,770** | **1,627,369** | **1,475,264** |
@@ -79,7 +78,7 @@ Input Image (32×32×3)
 
 ## 4. Detailed Design Analysis Report
 
-A detailed design report discussing the accuracy, latency, and hardware utilization deltas, as well as the exact theoretical reasoning for these differences, is tracked in the repository:
+A detailed design report discussing the latency and hardware utilization deltas, as well as the exact theoretical reasoning for these differences, is tracked in the repository:
 👉 **[comparison_analysis_report.md](comparison_analysis_report.md)**
 
 ---

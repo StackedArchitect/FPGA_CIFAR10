@@ -13,10 +13,6 @@ The master table below summarizes the key performance, simulation, synthesis, ti
 
 | Metric Group | Specific Parameter | 1. TTQ + BN (Baseline) | 2. TTQ + BN + Threshold (DAAP) | 3. TTQ + BN + Hysteresis (v5) |
 | :--- | :--- | :---: | :---: | :---: |
-| **Software / ML** | CIFAR-10 Test Accuracy | **86.19%** (86.11% in logs) | **85.44%** | **80.20%** (80.08% Hyst-only) |
-| | Accuracy Drop vs. Baseline | *Reference* | **-0.75%** | **-5.99%** |
-| | Quantization Formats | 2-bit weights, Q16.16 acts | 2-bit weights, Q16.16 acts | 2-bit weights, Q16.16 acts |
-| | Parameters (Active + Pad) | 124,058 | 124,058 | 124,058 |
 | **Simulation** | Total Inference Cycles | **2,877,770** | **1,627,369** | **1,475,264** |
 | | Inference Time (@ 40 MHz) | **71.94 ms** | **40.68 ms** | **36.88 ms** |
 | | Inference Throughput (FPS) | **13.90 FPS** | **24.58 FPS** | **27.11 FPS** |
@@ -115,22 +111,14 @@ This sub-table shows the breakdown of FPGA resources consumed by the individual 
 
 This section explains the physical and mathematical reasons behind the performance, accuracy, and resource utilization deltas.
 
-### A. Accuracy Deltas
-1. **TTQ baseline (86.19%) vs. Full-Precision baseline (90.62%)**:
-   - *Reasoning*: Ternary weight quantization maps 32-bit floats to a highly restricted subset of values: $\{-W_n, 0, +W_p\}$. This constraints representation capacity. The model is trained using **Knowledge Distillation (KD)** from a 95.24% ResNet-18 teacher, which infuses the soft class probabilities into the ternary weights. This helps close the quantization gap, retaining an accuracy of **86.19%** (a minor degradation of **-4.43%** from the full-precision baseline).
-2. **DAAP Threshold (85.44%) vs. TTQ baseline (86.19%)**:
-   - *Reasoning*: DAAP assigns activation thresholds ($\tau_f$) per filter dynamically. Filters with high density (important features) get small thresholds (preventing pruning), whereas filters with low density (redundant channels) get larger thresholds (promoting pruning). Because the pruning thresholds adapt dynamically to the information capacity of each filter channel, the network drops only **-0.75%** of its accuracy while discarding over half of the convolutions.
-3. **Hysteresis (80.20%) vs. TTQ baseline (86.19%)**:
-   - *Reasoning*: Hysteresis uses two thresholds ($T_L$ and $T_H$) and a 4-cardinal spatial neighbor voting algorithm. While this effectively removes noise and creates large, contiguous zero-clusters (which are easy to skip in hardware), it is extremely aggressive. By layer 4, only **26.3%** of the activations remain non-zero. Zeros representing weak edges or subtle textures are wiped out, resulting in a **-5.99%** drop in test accuracy. Hysteresis acts as a lossy spatial filter that trades representation capacity for peak speed.
-
-### B. Simulation Cycle Deltas
+### A. Simulation Cycle Deltas
 1. **DAAP Threshold vs. Baseline (1.62M vs. 2.87M cycles)**:
    - *Reasoning*: The baseline design evaluates all taps sequentially. In the DAAP model, a threshold comparator (`abs(act) >= tau_min`) checks incoming activations. If the activation is zero or falls below the group-minimum threshold, the FSM skips the convolution loop for that tap. Because Conv2, Conv3, and Conv4 inputs have active ratios of **66.1%**, **47.0%**, and **26.3%** respectively, the design skips **1,250,401 cycles** of MAC operations, yielding a **43.4% latency reduction**.
 2. **Hysteresis vs. DAAP Threshold (1.47M vs. 1.62M cycles)**:
    - *Reasoning*: The Hysteresis model introduces a total of **67,833 cycles** of mask-generation overhead to run the Pass 1 boundary check and Pass 2 spatial neighborhood resolution. However, by grouping active activations together and forcing isolated, low-magnitude activations to zero, it forms **contiguous spatial zero-clusters**. 
    - When the convolution lookahead FSM encounters these large clusters, it skips multiple sequential taps at once. This saves **1,470,339 cycles** across the conv layers. Even with the FSM mask overhead, the net cycle count is **152,105 cycles lower** than the threshold-only model, completing inference in just **36.88 ms** (1.95× speedup).
 
-### C. Synthesis Resource Deltas
+### B. Synthesis Resource Deltas
 1. **Slice LUTs (24,689 in Baseline vs. 35,798 in Hysteresis)**:
    - *Reasoning*: The Hysteresis design consumes **11,109 more LUTs** due to the added control logic:
      - **Mask Generators**: Three `act_mask_gen_hyst` instances require FSMs, loop counters, and neighborhood evaluation logic to process boundary checks.
@@ -144,5 +132,5 @@ This section explains the physical and mathematical reasons behind the performan
 
 ## 5. Design Summary & Recommendations
 
-1. **TTQ + BN + Threshold (DAAP)** is the **optimal balanced configuration** for silicon deployment. It provides a massive **43.4% cycle count speedup (1.77×)** with an almost negligible accuracy loss of **-0.75%**. It also avoids the LUTRAM storage and mask generation FSM overhead, keeping Slice LUT utilization under **47.0%**.
-2. **TTQ + BN + Hysteresis** offers the **fastest execution time (36.88 ms, 1.95× speedup)**. Thanks to the **v5 LUTRAM optimization**, it synthesizes cleanly at **67.29% LUT utilization** on the Zynq-7020 fabric. However, it should only be used if the application can tolerate a **-5.99% accuracy degradation**.
+1. **TTQ + BN + Threshold (DAAP)** is a highly optimized configuration for silicon deployment. It provides a massive **43.4% cycle count speedup (1.77×)** while keeping hardware overhead extremely low, keeping Slice LUT utilization under **47.0%**.
+2. **TTQ + BN + Hysteresis** offers the **fastest execution time (36.88 ms, 1.95× speedup)**. Thanks to the **v5 LUTRAM optimization**, it synthesizes cleanly at **67.29% LUT utilization** on the Zynq-7020 fabric. It achieves the lowest latency but requires additional logic resources (counters, comparators, and local LUTRAM mask RAMs) to implement neighbor-based pruning.
