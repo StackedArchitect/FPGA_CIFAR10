@@ -117,7 +117,7 @@ module tb_cnn2d_cifar_ttq;
                 integer m_cnt;
                 m_cnt = 0;
                 for (integer i = 0; i < 8192; i = i + 1) begin
-                    if (u_dut.u_dut.mask1_vector[i]) m_cnt = m_cnt + 1;
+                    if (u_dut.u_dut.u_conv_pool_2.gen_mask.mask_mem[i]) m_cnt = m_cnt + 1;
                 end
                 $display("[DEBUG] mask_gen_1 active count: %0d / 8192", m_cnt);
             end
@@ -132,7 +132,7 @@ module tb_cnn2d_cifar_ttq;
                 integer m_cnt;
                 m_cnt = 0;
                 for (integer i = 0; i < 4096; i = i + 1) begin
-                    if (u_dut.u_dut.mask2_vector[i]) m_cnt = m_cnt + 1;
+                    if (u_dut.u_dut.u_conv_3.gen_mask.mask_mem[i]) m_cnt = m_cnt + 1;
                 end
                 $display("[DEBUG] mask_gen_2 active count: %0d / 4096", m_cnt);
             end
@@ -147,7 +147,7 @@ module tb_cnn2d_cifar_ttq;
                 integer m_cnt;
                 m_cnt = 0;
                 for (integer i = 0; i < 4096; i = i + 1) begin
-                    if (u_dut.u_dut.mask3_vector[i]) m_cnt = m_cnt + 1;
+                    if (u_dut.u_dut.u_conv_4.gen_mask.mask_mem[i]) m_cnt = m_cnt + 1;
                 end
                 $display("[DEBUG] mask_gen_3 active count: %0d / 4096", m_cnt);
             end
