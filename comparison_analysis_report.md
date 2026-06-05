@@ -17,17 +17,17 @@ The master table below summarizes the key performance, simulation, synthesis, ti
 | | Inference Time (@ 40 MHz) | **71.94 ms** | **50.45 ms** | **36.88 ms** |
 | | Inference Throughput (FPS) | **13.90 FPS** | **19.82 FPS** | **27.11 FPS** |
 | | Cycle Count Speedup | *Reference* | **1.43× (29.9% reduction)** | **1.95× (48.7% reduction)** |
-| **Synthesis** | Slice LUTs Used | **24,689** (46.41%) | **~29,500** (~55.45%) | **35,798** (67.29%) |
-| | Slice Flip-Flops Used | **16,437** (15.45%) | **~16,500** (~15.50%) | **16,623** (15.62%) |
+| **Synthesis** | Slice LUTs Used | **24,689** (46.41%) | **31,828** (59.83%) | **35,798** (67.29%) |
+| | Slice Flip-Flops Used | **16,437** (15.45%) | **16,769** (15.76%) | **16,623** (15.62%) |
 | | Block RAM Tiles (36K) | **16.0** (11.43%) | **16.00** (11.43%) | **17.50** (12.50%) |
 | | DSP Slices | **36** (16.36%) | **36** (16.36%) | **36** (16.36%) |
 | | Bonded I/O Pins | **6** (3.00%) | **6** (3.00%) | **6** (3.00%) |
 | **Timing** | Clock Period Target | 25.0 ns (40 MHz) | 25.0 ns (40 MHz) | 25.0 ns (40 MHz) |
-| | Worst Negative Slack (WNS) | **+10.521 ns** | Met (Positive) | **+6.225 ns** |
-| | Worst Hold Slack (WHS) | **+0.132 ns** | Met (Positive) | **+0.132 ns** |
-| | Max Fabric Fmax (est.) | **69.0 MHz** | ~62 MHz | **53.2 MHz** |
-| **Power** | Total On-Chip Power | **0.154 W** | ~0.156 W | **0.160 W** |
-| | Dynamic Power Breakdown | 0.048 W (31%) | ~0.050 W | 0.054 W (34%) |
+| | Worst Negative Slack (WNS) | **+10.521 ns** | **+10.315 ns** | **+6.225 ns** |
+| | Worst Hold Slack (WHS) | **+0.132 ns** | **+0.132 ns** | **+0.132 ns** |
+| | Max Fabric Fmax (est.) | **69.0 MHz** | **68.1 MHz** | **53.2 MHz** |
+| **Power** | Total On-Chip Power | **0.154 W** | **0.162 W** | **0.160 W** |
+| | Dynamic Power Breakdown | 0.048 W (31%) | 0.056 W (35%) | 0.054 W (34%) |
 | | Device Static Power | 0.106 W (69%) | 0.106 W | 0.106 W (66%) |
 | | Junction Temperature | 26.8°C | 26.9°C | 26.9°C |
 
@@ -80,21 +80,21 @@ This sub-table shows the breakdown of FPGA resources consumed by the individual 
 
 | Module / Instance | Resource | 1. TTQ + BN (Baseline) | 2. TTQ + BN + Threshold (2-tap) | 3. TTQ + BN + Hysteresis (v5) |
 | :--- | :--- | :---: | :---: | :---: |
-| **cnn2d_synth_top** | **Slice LUTs** | **24,689 (46.41%)** | **~29,500 (~55.45%)** | **35,798 (67.29%)** |
-| (Top Synthesis wrapper) | **Slice FFs** | **16,437 (15.45%)** | **~16,500 (~15.50%)** | **16,623 (15.62%)** |
+| **cnn2d_synth_top** | **Slice LUTs** | **24,689 (46.41%)** | **31,828 (59.83%)** | **35,798 (67.29%)** |
+| (Top Synthesis wrapper) | **Slice FFs** | **16,437 (15.45%)** | **16,769 (15.76%)** | **16,623 (15.62%)** |
 | | **BRAM Tiles** | **16.00 (11.43%)** | **16.00 (11.43%)** | **17.50 (12.50%)** |
 | | **DSPs** | **36 (16.36%)** | **36 (16.36%)** | **36 (16.36%)** |
-| `u_conv_pool_1` | Slice LUTs / FFs | 5,105 / 804 | ~5,400 / 804 | 5,861 / 802 |
+| `u_conv_pool_1` | Slice LUTs / FFs | 5,105 / 804 | 5,536 / 803 | 5,861 / 802 |
 | | BRAM / DSPs | 0.0 / 4 | 0.0 / 4 | 0.0 / 4 |
-| `u_conv_pool_2` | Slice LUTs / FFs | 2,646 / 796 | ~2,950 / 798 | 3,412 / 792 |
+| `u_conv_pool_2` | Slice LUTs / FFs | 2,646 / 796 | 2,898 / 792 | 3,412 / 792 |
 | | BRAM / DSPs | 0.0 / 4 | 0.0 / 4 | 0.0 / 4 |
-| `u_conv_3` | Slice LUTs / FFs | 1,590 / 650 | ~1,950 / 652 | 2,448 / 652 |
+| `u_conv_3` | Slice LUTs / FFs | 1,590 / 650 | 2,012 / 652 | 2,448 / 652 |
 | | BRAM / DSPs | 0.0 / 4 | 0.0 / 4 | 0.0 / 4 |
-| `u_conv_4` | Slice LUTs / FFs | 1,495 / 651 | ~1,900 / 653 | 2,480 / 650 |
+| `u_conv_4` | Slice LUTs / FFs | 1,495 / 651 | 2,085 / 652 | 2,480 / 650 |
 | | BRAM / DSPs | 0.0 / 4 | 0.0 / 4 | 0.0 / 4 |
-| `u_fc1` | Slice LUTs / FFs | 9,554 / 10,593 | ~10,800 / 10,610 | 13,053 / 10,625 |
+| `u_fc1` | Slice LUTs / FFs | 9,554 / 10,593 | 11,163 / 10,628 | 13,053 / 10,625 |
 | | BRAM / DSPs | 0.0 / 12 | 0.0 / 12 | 0.0 / 12 |
-| `u_fc2` | Slice LUTs / FFs | 3,298 / 779 | ~4,700 / 781 | 6,926 / 783 |
+| `u_fc2` | Slice LUTs / FFs | 3,298 / 779 | 6,687 / 783 | 6,926 / 783 |
 | | BRAM / DSPs | 0.0 / 8 | 0.0 / 8 | 0.0 / 8 |
 | `u_gap` | Slice LUTs / FFs | 256 / 2,157 | 256 / 2,157 | 256 / 2,157 |
 | | BRAM / DSPs | 0.0 / 0 | 0.0 / 0 | 0.0 / 0 |
@@ -119,9 +119,9 @@ This section explains the physical and mathematical reasons behind the performan
    - When the convolution lookahead FSM encounters these large clusters, it skips multiple sequential taps at once. This saves **1,470,339 cycles** across the conv layers. Even with the FSM mask overhead, the net cycle count is **542,697 cycles lower** than the 2-tap threshold-only model, completing inference in just **36.88 ms** (1.95× speedup).
 
 ### B. Synthesis Resource Deltas
-1. **Slice LUTs (24,689 in Baseline, ~29,500 in 2-tap Threshold, 35,798 in Hysteresis)**:
+1. **Slice LUTs (24,689 in Baseline, 31,828 in 2-tap Threshold, 35,798 in Hysteresis)**:
    - *Reasoning*: The original 4-tap Threshold design used **35,626 LUTs**—virtually identical to the Hysteresis design. Both models shared a 4-tap lookahead FSM that required 4 parallel weight ROM read ports (multiplexing logic), 4 parallel bounds-checking/address-math blocks, and a complex priority skip-encoder.
-   - Refactoring the Thresholding model to use **2-tap lookahead skip logic** (only looking ahead to the next tap) reduces the weight ROM read ports from 4 to 2 (distributed ROM multiplexing complexity cut in half), simplifies the address calculation and bounds check logic by 50%, and simplifies the skip-state logic to advance by 1 or 2 cycles. This reduces the estimated LUT utilization to **~29,500 LUTs**, positioning the design perfectly as a physical middle-ground between baseline and Hysteresis.
+   - Refactoring the Thresholding model to use **2-tap lookahead skip logic** (only looking ahead to the next tap) reduces the weight ROM read ports from 4 to 2 (distributed ROM multiplexing complexity cut in half), simplifies the address calculation and bounds check logic by 50%, and simplifies the skip-state logic to advance by 1 or 2 cycles. This reduces the actual LUT utilization to **31,828 LUTs (59.83%)**, positioning the design perfectly as a physical middle-ground between baseline and Hysteresis.
 2. **Block RAM (16.0 in Baseline and Threshold vs 17.5 in Hysteresis)**:
    - *Reasoning*: The baseline and 2-tap Threshold models use **16.0 BRAM36 tiles** (8 tiles for `fmap_a` ping-pong buffer, 8 tiles for `fmap_b`). The Hysteresis model instantiates three additional `xpm_memory_sdpram` blocks (1.5 BRAM36 equivalent) as status RAMs inside the mask generators, whereas the Thresholding model's mask generators compute thresholds on-the-fly and write sequentially to LUTRAM mask storage directly, avoiding any additional BRAM overhead.
 
@@ -129,5 +129,5 @@ This section explains the physical and mathematical reasons behind the performan
 
 ## 5. Design Summary & Recommendations
 
-1. **TTQ + BN + Threshold (DAAP)** with **2-tap lookahead skip logic** is a highly balanced configuration for silicon deployment. It provides a solid **29.9% cycle count speedup (1.43×)** while keeping hardware overhead moderate (~29,500 LUTs, saving ~6,100 LUTs over the original 4-tap logic).
+1. **TTQ + BN + Threshold (DAAP)** with **2-tap lookahead skip logic** is a highly balanced configuration for silicon deployment. It provides a solid **29.9% cycle count speedup (1.43×)** while keeping hardware overhead moderate (**31,828 LUTs**, saving **3,798 LUTs** over the original 4-tap logic).
 2. **TTQ + BN + Hysteresis** offers the **fastest execution time (36.88 ms, 1.95× speedup)**. Thanks to the **v5 LUTRAM optimization**, it synthesizes cleanly at **67.29% LUT utilization** on the Zynq-7020 fabric. It achieves the lowest latency but requires additional logic resources (counters, comparators, and local LUTRAM mask RAMs) to implement neighbor-based pruning.
