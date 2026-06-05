@@ -124,17 +124,11 @@
 
     // Combinational lookahead weight reads
     wire signed [1:0] w_rom_combo_p1;
-    wire signed [1:0] w_rom_combo_p2;
-    wire signed [1:0] w_rom_combo_p3;
     generate
         if (FORCE_BRAM) begin : gen_bram_la
             assign w_rom_combo_p1 = (w_addr + 1 < TOTAL_WEIGHTS) ? gen_bram_w.w_rom_bram[w_addr + 1] : 2'b00;
-            assign w_rom_combo_p2 = (w_addr + 2 < TOTAL_WEIGHTS) ? gen_bram_w.w_rom_bram[w_addr + 2] : 2'b00;
-            assign w_rom_combo_p3 = (w_addr + 3 < TOTAL_WEIGHTS) ? gen_bram_w.w_rom_bram[w_addr + 3] : 2'b00;
         end else begin : gen_dist_la
             assign w_rom_combo_p1 = (w_addr + 1 < TOTAL_WEIGHTS) ? gen_dist_w.w_rom_dist[w_addr + 1] : 2'b00;
-            assign w_rom_combo_p2 = (w_addr + 2 < TOTAL_WEIGHTS) ? gen_dist_w.w_rom_dist[w_addr + 2] : 2'b00;
-            assign w_rom_combo_p3 = (w_addr + 3 < TOTAL_WEIGHTS) ? gen_dist_w.w_rom_dist[w_addr + 3] : 2'b00;
         end
     endgenerate
 
@@ -163,19 +157,15 @@
 
     // Lookahead checks for weights
     wire skip_p1 = (input_idx + 1 <= LAYER_NEURON_WIDTH) ? (w_rom_combo_p1 == 2'b00) : 1'b0;
-    wire skip_p2 = (input_idx + 2 <= LAYER_NEURON_WIDTH) ? (w_rom_combo_p2 == 2'b00) : 1'b0;
-    wire skip_p3 = (input_idx + 3 <= LAYER_NEURON_WIDTH) ? (w_rom_combo_p3 == 2'b00) : 1'b0;
 
-    // Compute advance amount (1 to 4)
-    wire [2:0] skip_advance;
-    assign skip_advance = (!cur_skip) ? 3'd1 :
-                          (!skip_p1) ? 3'd1 :
-                          (!skip_p2) ? 3'd2 :
-                          (!skip_p3) ? 3'd3 : 3'd4;
+    // Compute advance amount (1 to 2)
+    wire [1:0] skip_advance;
+    assign skip_advance = (!cur_skip) ? 2'd1 :
+                          (!skip_p1) ? 2'd1 : 2'd2;
 
     always @(posedge clk) begin
         if (!rstn) skipped_multi_last <= 1'b0;
-        else       skipped_multi_last <= (state == S_MAC && skip_advance > 3'd1);
+        else       skipped_multi_last <= (state == S_MAC && skip_advance > 2'd1);
     end
 
     wire [31:0] next_input_idx = input_idx + {29'd0, skip_advance};

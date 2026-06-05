@@ -208,34 +208,18 @@
     wire [31:0] ch_1 = (kc_0 == KERNEL_W - 1 && kr_0 == KERNEL_H - 1) ? ch_0 + 32'd1 : ch_0;
     wire        eoc_1 = (kc_1 == KERNEL_W - 1) && (kr_1 == KERNEL_H - 1) && (ch_1 == IN_CH - 1);
 
-    // Tap 2
+    // Tap 2 (Next state fallback)
     wire [31:0] kc_2 = (kc_1 == KERNEL_W - 1) ? 32'd0 : kc_1 + 32'd1;
     wire [31:0] kr_2 = (kc_1 == KERNEL_W - 1) ? ((kr_1 == KERNEL_H - 1) ? 32'd0 : kr_1 + 32'd1) : kr_1;
     wire [31:0] ch_2 = (kc_1 == KERNEL_W - 1 && kr_1 == KERNEL_H - 1) ? ch_1 + 32'd1 : ch_1;
     wire        eoc_2 = (kc_2 == KERNEL_W - 1) && (kr_2 == KERNEL_H - 1) && (ch_2 == IN_CH - 1);
 
-    // Tap 3
-    wire [31:0] kc_3 = (kc_2 == KERNEL_W - 1) ? 32'd0 : kc_2 + 32'd1;
-    wire [31:0] kr_3 = (kc_2 == KERNEL_W - 1) ? ((kr_2 == KERNEL_H - 1) ? 32'd0 : kr_2 + 32'd1) : kr_2;
-    wire [31:0] ch_3 = (kc_2 == KERNEL_W - 1 && kr_2 == KERNEL_H - 1) ? ch_2 + 32'd1 : ch_2;
-    wire        eoc_3 = (kc_3 == KERNEL_W - 1) && (kr_3 == KERNEL_H - 1) && (ch_3 == IN_CH - 1);
-
-    // Tap 4
-    wire [31:0] kc_4 = (kc_3 == KERNEL_W - 1) ? 32'd0 : kc_3 + 32'd1;
-    wire [31:0] kr_4 = (kc_3 == KERNEL_W - 1) ? ((kr_3 == KERNEL_H - 1) ? 32'd0 : kr_3 + 32'd1) : kr_3;
-    wire [31:0] ch_4 = (kc_3 == KERNEL_W - 1 && kr_3 == KERNEL_H - 1) ? ch_3 + 32'd1 : ch_3;
-    wire        eoc_4 = (kc_4 == KERNEL_W - 1) && (kr_4 == KERNEL_H - 1) && (ch_4 == IN_CH - 1);
-
     // Flat ROM weights address for each tap index
     wire [31:0] tap_idx_0 = ch_0 * (KERNEL_H * KERNEL_W) + kr_0 * KERNEL_W + kc_0;
     wire [31:0] tap_idx_1 = ch_1 * (KERNEL_H * KERNEL_W) + kr_1 * KERNEL_W + kc_1;
-    wire [31:0] tap_idx_2 = ch_2 * (KERNEL_H * KERNEL_W) + kr_2 * KERNEL_W + kc_2;
-    wire [31:0] tap_idx_3 = ch_3 * (KERNEL_H * KERNEL_W) + kr_3 * KERNEL_W + kc_3;
 
     wire [31:0] w_addr_0 = group_idx * TAP_COUNT + tap_idx_0;
     wire [31:0] w_addr_1 = group_idx * TAP_COUNT + tap_idx_1;
-    wire [31:0] w_addr_2 = group_idx * TAP_COUNT + tap_idx_2;
-    wire [31:0] w_addr_3 = group_idx * TAP_COUNT + tap_idx_3;
 
     wire [31:0] tap_idx = tap_idx_0;
 
@@ -253,20 +237,6 @@
     wire in_col_valid_1 = (pad_col_sum_1 >= PAD_SIZE) && (pad_col_sum_1 < PAD_SIZE + IN_W);
     wire bounds_1 = in_row_valid_1 && in_col_valid_1;
     wire [31:0] addr_1 = ch_1 * (IN_H * IN_W) + (pad_row_sum_1 - PAD_SIZE) * IN_W + (pad_col_sum_1 - PAD_SIZE);
-
-    wire [31:0] pad_row_sum_2 = conv_out_row + kr_2;
-    wire [31:0] pad_col_sum_2 = conv_out_col + kc_2;
-    wire in_row_valid_2 = (pad_row_sum_2 >= PAD_SIZE) && (pad_row_sum_2 < PAD_SIZE + IN_H);
-    wire in_col_valid_2 = (pad_col_sum_2 >= PAD_SIZE) && (pad_col_sum_2 < PAD_SIZE + IN_W);
-    wire bounds_2 = in_row_valid_2 && in_col_valid_2;
-    wire [31:0] addr_2 = ch_2 * (IN_H * IN_W) + (pad_row_sum_2 - PAD_SIZE) * IN_W + (pad_col_sum_2 - PAD_SIZE);
-
-    wire [31:0] pad_row_sum_3 = conv_out_row + kr_3;
-    wire [31:0] pad_col_sum_3 = conv_out_col + kc_3;
-    wire in_row_valid_3 = (pad_row_sum_3 >= PAD_SIZE) && (pad_row_sum_3 < PAD_SIZE + IN_H);
-    wire in_col_valid_3 = (pad_col_sum_3 >= PAD_SIZE) && (pad_col_sum_3 < PAD_SIZE + IN_W);
-    wire bounds_3 = in_row_valid_3 && in_col_valid_3;
-    wire [31:0] addr_3 = ch_3 * (IN_H * IN_W) + (pad_row_sum_3 - PAD_SIZE) * IN_W + (pad_col_sum_3 - PAD_SIZE);
 
     wire [31:0] data_idx = addr_0;
     wire in_bounds = bounds_0;
@@ -301,8 +271,6 @@
 
     wire w_zero_0;
     wire w_zero_1;
-    wire w_zero_2;
-    wire w_zero_3;
 
     // ================================================================
     //  Mask LUTRAM — distributed RAM with combinational (0-cycle) reads.
@@ -312,7 +280,7 @@
     //  LUTRAM cost: ~600-1200 LUTs (vs 84K for the original flat register).
     //  Pipeline impact: ZERO — combinational read = same-cycle availability.
     // ================================================================
-    wire mask_0, mask_1, mask_2, mask_3;
+    wire mask_0, mask_1;
 
     generate
     if (HAS_MASK) begin : gen_mask
@@ -330,34 +298,22 @@
         // Combinational read ports (zero latency)
         assign mask_0 = bounds_0 ? mask_mem[addr_0] : 1'b0;
         assign mask_1 = bounds_1 ? mask_mem[addr_1] : 1'b0;
-        assign mask_2 = bounds_2 ? mask_mem[addr_2] : 1'b0;
-        assign mask_3 = bounds_3 ? mask_mem[addr_3] : 1'b0;
     end else begin : gen_no_mask
         assign mask_0 = bounds_0;
         assign mask_1 = bounds_1;
-        assign mask_2 = bounds_2;
-        assign mask_3 = bounds_3;
     end
     endgenerate
 
     wire skip_0 = (!mask_0) || w_zero_0;
     wire skip_1 = (!mask_1) || w_zero_1;
-    wire skip_2 = (!mask_2) || w_zero_2;
-    wire skip_3 = (!mask_3) || w_zero_3;
 
-    // Compute advance amount (1 to 4)
-    wire [2:0] skip_advance;
-    assign skip_advance = (!skip_1) ? 3'd1 :
-                          (eoc_1)   ? 3'd1 :
-                          (!skip_2) ? 3'd2 :
-                          (eoc_2)   ? 3'd2 :
-                          (!skip_3) ? 3'd3 :
-                          (eoc_3)   ? 3'd3 : 3'd4;
+    // Compute advance amount (1 to 2)
+    wire [1:0] skip_advance;
+    assign skip_advance = (!skip_1) ? 2'd1 :
+                          (eoc_1)   ? 2'd1 : 2'd2;
 
-    wire transition_to_drain = (skip_advance == 3'd1 && eoc_1) ||
-                               (skip_advance == 3'd2 && eoc_2) ||
-                               (skip_advance == 3'd3 && eoc_3) ||
-                               (skip_advance == 3'd4 && (eoc_4 || (ch_4 == 0 && kr_4 == 0 && kc_4 == 0)));
+    wire transition_to_drain = (skip_advance == 2'd1 && eoc_1) ||
+                               (skip_advance == 2'd2 && (eoc_2 || (ch_2 == 0 && kr_2 == 0 && kc_2 == 0)));
 
     reg skip_0_d;
     always @(posedge clk) begin
@@ -406,24 +362,14 @@
                               (w_rom_split_2[w_addr_1] == 2'b00) &&
                               (w_rom_split_3[w_addr_1] == 2'b00);
 
-            assign w_zero_2 = (w_rom_split_0[w_addr_2] == 2'b00) &&
-                              (w_rom_split_1[w_addr_2] == 2'b00) &&
-                              (w_rom_split_2[w_addr_2] == 2'b00) &&
-                              (w_rom_split_3[w_addr_2] == 2'b00);
-
-            assign w_zero_3 = (w_rom_split_0[w_addr_3] == 2'b00) &&
-                              (w_rom_split_1[w_addr_3] == 2'b00) &&
-                              (w_rom_split_2[w_addr_3] == 2'b00) &&
-                              (w_rom_split_3[w_addr_3] == 2'b00);
-
             genvar gf;
             for (gf = 0; gf < 4; gf = gf + 1) begin : gen_filter_pipe
-                always @(posedge clk) begin
-                    if (gf == 0) p1_code[0] <= w_rom_split_0[group_idx * TAP_COUNT + tap_idx];
-                    else if (gf == 1) p1_code[1] <= w_rom_split_1[group_idx * TAP_COUNT + tap_idx];
-                    else if (gf == 2) p1_code[2] <= w_rom_split_2[group_idx * TAP_COUNT + tap_idx];
-                    else if (gf == 3) p1_code[3] <= w_rom_split_3[group_idx * TAP_COUNT + tap_idx];
-                end
+                 always @(posedge clk) begin
+                     if (gf == 0) p1_code[0] <= w_rom_split_0[group_idx * TAP_COUNT + tap_idx];
+                     else if (gf == 1) p1_code[1] <= w_rom_split_1[group_idx * TAP_COUNT + tap_idx];
+                     else if (gf == 2) p1_code[2] <= w_rom_split_2[group_idx * TAP_COUNT + tap_idx];
+                     else if (gf == 3) p1_code[3] <= w_rom_split_3[group_idx * TAP_COUNT + tap_idx];
+                 end
             end
         end else begin : gen_par_generic
             // Fallback to monolithic ROM if PARALLEL_CH is not 4
@@ -432,8 +378,6 @@
 
             assign w_zero_0 = 1'b0;
             assign w_zero_1 = 1'b0;
-            assign w_zero_2 = 1'b0;
-            assign w_zero_3 = 1'b0;
 
             genvar gf;
             for (gf = 0; gf < PARALLEL_CH; gf = gf + 1) begin : gen_filter_pipe
@@ -591,25 +535,15 @@
                         state     <= S_CONV_DRAIN;
                     end else begin
                         case (skip_advance)
-                            3'd1: begin
+                            2'd1: begin
                                 ch_cnt <= ch_1;
                                 kr_cnt <= kr_1;
                                 kc_cnt <= kc_1;
                             end
-                            3'd2: begin
+                            2'd2: begin
                                 ch_cnt <= ch_2;
                                 kr_cnt <= kr_2;
                                 kc_cnt <= kc_2;
-                            end
-                            3'd3: begin
-                                ch_cnt <= ch_3;
-                                kr_cnt <= kr_3;
-                                kc_cnt <= kc_3;
-                            end
-                            3'd4: begin
-                                ch_cnt <= ch_4;
-                                kr_cnt <= kr_4;
-                                kc_cnt <= kc_4;
                             end
                             default: ;
                         endcase
