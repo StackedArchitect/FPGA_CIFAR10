@@ -38,6 +38,11 @@
     parameter POOL_OUT_W  = CONV_OUT_W / POOL_W,
     parameter BITS        = 31,
     parameter MASK_SIZE   = IN_CH * IN_H * IN_W,
+    // Derived — do not override
+    parameter MASK_ADDR_W = $clog2(MASK_SIZE) > 0 ? $clog2(MASK_SIZE) : 1,
+
+    // 1 = mask read from BRAM/LUTRAM, 0 = no mask (all pixels active)
+    parameter HAS_MASK    = 1,
 
     // Weight/BN file paths — loaded via $readmemh into internal ROMs.
     parameter WEIGHT_FILE     = "",   // 2-bit ternary codes
@@ -52,8 +57,10 @@
     input  wire                     rstn,
     input  wire                     activation_function,
 
-    // Hysteresis activation mask input
-    input  wire [MASK_SIZE-1:0]     act_mask,
+    // Hysteresis/Threshold activation mask — write port from mask generator
+    input  wire                     mask_wr_en,
+    input  wire [MASK_ADDR_W-1:0]   mask_wr_addr,
+    input  wire                     mask_wr_data,
 
     // BRAM read port — reads from previous layer's feature map
     output wire [31:0]              fm_rd_addr,
@@ -297,10 +304,41 @@
     wire w_zero_2;
     wire w_zero_3;
 
-    wire mask_0 = bounds_0 ? act_mask[addr_0] : 1'b0;
-    wire mask_1 = bounds_1 ? act_mask[addr_1] : 1'b0;
-    wire mask_2 = bounds_2 ? act_mask[addr_2] : 1'b0;
-    wire mask_3 = bounds_3 ? act_mask[addr_3] : 1'b0;
+    // ================================================================
+    //  Mask LUTRAM — distributed RAM with combinational (0-cycle) reads.
+    //  Written by the mask generator during its phase (before conv starts).
+    //  Read combinationally by all 4 taps — same pipeline as original.
+    //
+    //  LUTRAM cost: ~600-1200 LUTs (vs 84K for the original flat register).
+    //  Pipeline impact: ZERO — combinational read = same-cycle availability.
+    // ================================================================
+    wire mask_0, mask_1, mask_2, mask_3;
+
+    generate
+    if (HAS_MASK) begin : gen_mask
+        (* ram_style = "distributed" *) reg mask_mem [0 : MASK_SIZE - 1];
+
+        integer mi;
+        initial for (mi = 0; mi < MASK_SIZE; mi = mi + 1) mask_mem[mi] = 1'b1;
+
+        // Write port — driven by mask generator (active before conv starts)
+        always @(posedge clk) begin
+            if (mask_wr_en)
+                mask_mem[mask_wr_addr] <= mask_wr_data;
+        end
+
+        // Combinational read ports (zero latency)
+        assign mask_0 = bounds_0 ? mask_mem[addr_0] : 1'b0;
+        assign mask_1 = bounds_1 ? mask_mem[addr_1] : 1'b0;
+        assign mask_2 = bounds_2 ? mask_mem[addr_2] : 1'b0;
+        assign mask_3 = bounds_3 ? mask_mem[addr_3] : 1'b0;
+    end else begin : gen_no_mask
+        assign mask_0 = bounds_0;
+        assign mask_1 = bounds_1;
+        assign mask_2 = bounds_2;
+        assign mask_3 = bounds_3;
+    end
+    endgenerate
 
     wire skip_0 = (!mask_0) || w_zero_0;
     wire skip_1 = (!mask_1) || w_zero_1;

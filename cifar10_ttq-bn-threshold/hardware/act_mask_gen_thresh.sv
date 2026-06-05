@@ -16,7 +16,9 @@
     parameter IN_CH       = 32,
     parameter BITS        = 31,
     parameter LOG2_HW     = 8,   // Log2 of (IN_H * IN_W)
-    parameter THRESH_FILE = ""   // Path to per-channel threshold ROM
+    parameter THRESH_FILE = "",  // Path to per-channel threshold ROM
+    // Derived — do not override
+    parameter MASK_ADDR_W = $clog2(IN_CH * IN_H * IN_W) > 0 ? $clog2(IN_CH * IN_H * IN_W) : 1
 )(
     input  wire                               clk,
     input  wire                               rstn,
@@ -26,8 +28,10 @@
     output reg  [31:0]                        bram_rd_addr,
     input  wire signed [BITS:0]               bram_rd_data,
  
-    // Output mask status
-    output reg  [IN_CH*IN_H*IN_W-1:0]         mask_out,
+    // Mask write port — consumer stores these in its own LUTRAM
+    output wire                               mask_wr_en_o,
+    output wire [MASK_ADDR_W-1:0]             mask_wr_addr_o,
+    output wire                               mask_wr_data_o,
     output reg                                done
 );
  
@@ -60,19 +64,32 @@
     reg [31:0] p_addr_d1;
     reg [31:0] p_addr_d2;
  
+    reg                               mask_wr_en;
+    reg [MASK_ADDR_W-1:0]             mask_wr_addr;
+    reg                               mask_wr_data;
+ 
+    assign mask_wr_en_o   = mask_wr_en;
+    assign mask_wr_addr_o = mask_wr_addr;
+    assign mask_wr_data_o = mask_wr_data;
+ 
     always @(posedge clk) begin
         if (!rstn) begin
             state        <= S_IDLE;
             bram_rd_addr <= 0;
-            mask_out     <= 0;
             done         <= 0;
             addr_cnt     <= 0;
             p_valid_d1   <= 0;
             p_valid_d2   <= 0;
             p_addr_d1    <= 0;
             p_addr_d2    <= 0;
+            mask_wr_en   <= 0;
+            mask_wr_addr <= 0;
+            mask_wr_data <= 0;
         end else begin
-            done <= 0;
+            done         <= 0;
+            mask_wr_en   <= 0;
+            mask_wr_addr <= 0;
+            mask_wr_data <= 0;
  
             case (state)
                 S_IDLE: begin
@@ -81,7 +98,6 @@
                         addr_cnt   <= 0;
                         p_valid_d1 <= 0;
                         p_valid_d2 <= 0;
-                        mask_out   <= 0;
                     end
                 end
  
@@ -100,10 +116,12 @@
                         automatic logic signed [BITS:0] abs_val = (val < 0) ? -val : val;
                         automatic logic [31:0] channel = p_addr_d2 >> LOG2_HW;
  
+                        mask_wr_en   <= 1'b1;
+                        mask_wr_addr <= p_addr_d2[MASK_ADDR_W-1:0];
                         if ($unsigned(abs_val) >= $unsigned(thresh_rom[channel][BITS:0])) begin
-                            mask_out[p_addr_d2] <= 1'b1;
+                            mask_wr_data <= 1'b1;
                         end else begin
-                            mask_out[p_addr_d2] <= 1'b0;
+                            mask_wr_data <= 1'b0;
                         end
                     end
  
@@ -126,10 +144,12 @@
                         automatic logic signed [BITS:0] abs_val = (val < 0) ? -val : val;
                         automatic logic [31:0] channel = p_addr_d2 >> LOG2_HW;
  
+                        mask_wr_en   <= 1'b1;
+                        mask_wr_addr <= p_addr_d2[MASK_ADDR_W-1:0];
                         if ($unsigned(abs_val) >= $unsigned(thresh_rom[channel][BITS:0])) begin
-                            mask_out[p_addr_d2] <= 1'b1;
+                            mask_wr_data <= 1'b1;
                         end else begin
-                            mask_out[p_addr_d2] <= 1'b0;
+                            mask_wr_data <= 1'b0;
                         end
                     end
  

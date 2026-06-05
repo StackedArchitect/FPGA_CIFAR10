@@ -377,11 +377,22 @@
     wire signed [31:0] fc2_wn = fc2_wn_arr[0];
 
     // ==================================================================
-    //  Threshold Mask Outputs
     // ==================================================================
-    wire [POOL1_SIZE_T-1:0] mask1_vector;
-    wire [POOL2_SIZE_T-1:0] mask2_vector;
-    wire [CONV3_SIZE-1:0]   mask3_vector;
+    //  Mask Write Wires (mask_gen → conv LUTRAM)
+    // ==================================================================
+    localparam MASK1_ADDR_W = $clog2(POOL1_SIZE_T) > 0 ? $clog2(POOL1_SIZE_T) : 1;
+    localparam MASK2_ADDR_W = $clog2(POOL2_SIZE_T) > 0 ? $clog2(POOL2_SIZE_T) : 1;
+    localparam MASK3_ADDR_W = $clog2(CONV3_SIZE)   > 0 ? $clog2(CONV3_SIZE)   : 1;
+
+    wire                    mask1_wr_en;    // MaskGen1 → Conv2
+    wire [MASK1_ADDR_W-1:0] mask1_wr_addr;
+    wire                    mask1_wr_data;
+    wire                    mask2_wr_en;    // MaskGen2 → Conv3
+    wire [MASK2_ADDR_W-1:0] mask2_wr_addr;
+    wire                    mask2_wr_data;
+    wire                    mask3_wr_en;    // MaskGen3 → Conv4
+    wire [MASK3_ADDR_W-1:0] mask3_wr_addr;
+    wire                    mask3_wr_data;
 
     // ==================================================================
     //  Instantiate Mask Generators
@@ -394,13 +405,15 @@
         .LOG2_HW    (8),
         .THRESH_FILE(CONV1_ACT_THRESH_FILE)
     ) u_mask_gen_1 (
-        .clk         (clk),
-        .rstn        (rstn),
-        .start       (mask_gen1_start),
-        .bram_rd_addr(mask_gen1_rd_addr),
-        .bram_rd_data(fmap_b_rd_data), // reads from BRAM B (Pool1 output)
-        .mask_out    (mask1_vector),
-        .done        (mask_gen1_done)
+        .clk           (clk),
+        .rstn          (rstn),
+        .start         (mask_gen1_start),
+        .bram_rd_addr  (mask_gen1_rd_addr),
+        .bram_rd_data  (fmap_b_rd_data), // reads from BRAM B (Pool1 output)
+        .mask_wr_en_o  (mask1_wr_en),
+        .mask_wr_addr_o(mask1_wr_addr),
+        .mask_wr_data_o(mask1_wr_data),
+        .done          (mask_gen1_done)
     );
 
     act_mask_gen_thresh #(
@@ -411,13 +424,15 @@
         .LOG2_HW    (6),
         .THRESH_FILE(CONV2_ACT_THRESH_FILE)
     ) u_mask_gen_2 (
-        .clk         (clk),
-        .rstn        (rstn),
-        .start       (mask_gen2_start),
-        .bram_rd_addr(mask_gen2_rd_addr),
-        .bram_rd_data(fmap_a_rd_data), // reads from BRAM A (Pool2 output)
-        .mask_out    (mask2_vector),
-        .done        (mask_gen2_done)
+        .clk           (clk),
+        .rstn          (rstn),
+        .start         (mask_gen2_start),
+        .bram_rd_addr  (mask_gen2_rd_addr),
+        .bram_rd_data  (fmap_a_rd_data), // reads from BRAM A (Pool2 output)
+        .mask_wr_en_o  (mask2_wr_en),
+        .mask_wr_addr_o(mask2_wr_addr),
+        .mask_wr_data_o(mask2_wr_data),
+        .done          (mask_gen2_done)
     );
 
     act_mask_gen_thresh #(
@@ -428,13 +443,15 @@
         .LOG2_HW    (6),
         .THRESH_FILE(CONV3_ACT_THRESH_FILE)
     ) u_mask_gen_3 (
-        .clk         (clk),
-        .rstn        (rstn),
-        .start       (mask_gen3_start),
-        .bram_rd_addr(mask_gen3_rd_addr),
-        .bram_rd_data(fmap_b_rd_data), // reads from BRAM B (Conv3 output)
-        .mask_out    (mask3_vector),
-        .done        (mask_gen3_done)
+        .clk           (clk),
+        .rstn          (rstn),
+        .start         (mask_gen3_start),
+        .bram_rd_addr  (mask_gen3_rd_addr),
+        .bram_rd_data  (fmap_b_rd_data), // reads from BRAM B (Conv3 output)
+        .mask_wr_en_o  (mask3_wr_en),
+        .mask_wr_addr_o(mask3_wr_addr),
+        .mask_wr_data_o(mask3_wr_data),
+        .done          (mask_gen3_done)
     );
 
     // ==================================================================
@@ -455,6 +472,7 @@
         .PARALLEL_CH (PARALLEL_CH),
         .BITS        (BITS),
         .MASK_SIZE   (DATA_IN_SIZE),
+        .HAS_MASK    (0),
         .WEIGHT_FILE  (CONV1_WEIGHT_FILE),
         .BIAS_FILE    (CONV1_BIAS_FILE),
         .BN_SCALE_FILE(CONV1_BN_SCALE_FILE),
@@ -466,7 +484,9 @@
         .clk                (clk),
         .rstn               (rstn),
         .activation_function(1'b1),
-        .act_mask           ({(DATA_IN_SIZE){1'b1}}),
+        .mask_wr_en         (1'b0),
+        .mask_wr_addr       ('0),
+        .mask_wr_data       (1'b0),
         .fm_rd_addr         (conv1_rd_addr),
         .fm_rd_data         (conv1_rd_data),
         .fm_wr_addr         (conv1_wr_addr),
@@ -494,6 +514,7 @@
         .PARALLEL_CH (PARALLEL_CH),
         .BITS        (BITS),
         .MASK_SIZE   (POOL1_SIZE_T),
+        .HAS_MASK    (1),
         .WEIGHT_FILE  (CONV2_WEIGHT_FILE),
         .BIAS_FILE    (CONV2_BIAS_FILE),
         .BN_SCALE_FILE(CONV2_BN_SCALE_FILE),
@@ -505,7 +526,9 @@
         .clk                (clk),
         .rstn               (phase >= 3'd2),
         .activation_function(1'b1),
-        .act_mask           (mask1_vector),
+        .mask_wr_en         (mask1_wr_en),
+        .mask_wr_addr       (mask1_wr_addr),
+        .mask_wr_data       (mask1_wr_data),
         .fm_rd_addr         (conv2_rd_addr),
         .fm_rd_data         (conv2_rd_data),
         .fm_wr_addr         (conv2_wr_addr),
@@ -533,6 +556,7 @@
         .PARALLEL_CH (PARALLEL_CH),
         .BITS        (BITS),
         .MASK_SIZE   (POOL2_SIZE_T),
+        .HAS_MASK    (1),
         .WEIGHT_FILE  (CONV3_WEIGHT_FILE),
         .BIAS_FILE    (CONV3_BIAS_FILE),
         .BN_SCALE_FILE(CONV3_BN_SCALE_FILE),
@@ -544,7 +568,9 @@
         .clk                (clk),
         .rstn               (phase >= 3'd4),
         .activation_function(1'b1),
-        .act_mask           (mask2_vector),
+        .mask_wr_en         (mask2_wr_en),
+        .mask_wr_addr       (mask2_wr_addr),
+        .mask_wr_data       (mask2_wr_data),
         .fm_rd_addr         (conv3_rd_addr),
         .fm_rd_data         (conv3_rd_data),
         .fm_wr_addr         (conv3_wr_addr),
@@ -572,6 +598,7 @@
         .PARALLEL_CH (PARALLEL_CH),
         .BITS        (BITS),
         .MASK_SIZE   (CONV3_SIZE),
+        .HAS_MASK    (1),
         .WEIGHT_FILE  (CONV4_WEIGHT_FILE),
         .BIAS_FILE    (CONV4_BIAS_FILE),
         .BN_SCALE_FILE(CONV4_BN_SCALE_FILE),
@@ -583,7 +610,9 @@
         .clk                (clk),
         .rstn               (phase >= 3'd6),
         .activation_function(1'b1),
-        .act_mask           (mask3_vector),
+        .mask_wr_en         (mask3_wr_en),
+        .mask_wr_addr       (mask3_wr_addr),
+        .mask_wr_data       (mask3_wr_data),
         .fm_rd_addr         (conv4_rd_addr),
         .fm_rd_data         (conv4_rd_data),
         .fm_wr_addr         (conv4_wr_addr),
