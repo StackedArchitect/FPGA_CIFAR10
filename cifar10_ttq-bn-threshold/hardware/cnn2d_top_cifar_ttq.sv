@@ -1,29 +1,33 @@
 `timescale 1ns / 1ps
 //============================================================================
-// CNN 2D Top — CIFAR-10 (Ping-Pong BRAM Feature Maps)
+// CNN 2D Top — CIFAR-10 TTQ + BatchNorm + DAAP + Hysteresis (Ping-Pong BRAM)
 //
-// Architecture:
+// Architecture (identical to baseline):
 //   Conv1(3→32, pad=1) → BN1 → Pool1
 //   Conv2(32→64, pad=1) → BN2 → Pool2
 //   Conv3(64→64, pad=1) → BN3 (no pool)
 //   Conv4(64→64, pad=1) → BN4 (no pool)
 //   GAP(8×8→1×1) → FC1(64→256) → BN5 → FC2(256→10)
 //
-// BRAM Strategy — Ping-Pong:
-//   Only 2 feature map BRAMs (A and B), each 8192 × 32-bit (8 BRAM36).
-//   Layers alternate between reading A/writing B and reading B/writing A.
-//
-//   Phase 0 (Conv1): read A (input)  → write B (pool1)
-//   Phase 1 (Conv2): read B (pool1)  → write A (pool2)
-//   Phase 2 (Conv3): read A (pool2)  → write B (conv3)
-//   Phase 3 (Conv4): read B (conv3)  → write A (conv4)
-//   Phase 4 (GAP):   read A (conv4)
-//
-// Total BRAM36: 116 (weights) + 16 (ping-pong) + 5 (conv_buf) = 137 / 140
+// Hysteresis Gating Integration:
+//   • Instantiates three act_mask_gen_hyst mask generators:
+//     - mask_gen_1 at Pool1 output (reads Buffer B, writes mask1_vector)
+//     - mask_gen_2 at Pool2 output (reads Buffer A, writes mask2_vector)
+//     - mask_gen_3 at Conv3 output (reads Buffer B, writes mask3_vector)
+//   • Transitions through FSM phases:
+//     - Phase 0: Conv1
+//     - Phase 1: Mask Gen 1
+//     - Phase 2: Conv2 (utilizes mask1_vector)
+//     - Phase 3: Mask Gen 2
+//     - Phase 4: Conv3 (utilizes mask2_vector)
+//     - Phase 5: Mask Gen 3
+//     - Phase 6: Conv4 (utilizes mask3_vector)
+//     - Phase 7: GAP + FCs
+//   • BRAM MUXes address/data lines during mask generator sub-phases.
 //
 // Target: XC7Z020CLG484-1 @ 40 MHz
 //============================================================================
-(* KEEP_HIERARCHY = "yes" *) module cnn2d_top_cifar #(
+(* KEEP_HIERARCHY = "yes" *) module cnn2d_top_cifar_ttq #(
     // ---- Input ----
     parameter INPUT_H         = 32,
     parameter INPUT_W         = 32,
@@ -74,39 +78,66 @@
     parameter FC1_WIDTH       = PAD + FC1_IN + PAD - 1,
     parameter FC2_WIDTH       = PAD + FC1_OUT + PAD - 1,
 
-    // Parallelism — 4 filters per group (fits BRAM budget)
+    // Parallelism — 4 filters per group
     parameter PARALLEL_CH     = 4,
 
     // Bit widths
     parameter BITS            = 31,
 
-    // Weight file paths for FC layers
+    // Weight file paths for FC layers (ternary codes)
     parameter FC1_WEIGHT_FILE = "",
     parameter FC2_WEIGHT_FILE = "",
 
-    // Weight/BN file paths for all Conv layers
+    // Conv weight file paths (ternary codes)
     parameter CONV1_WEIGHT_FILE   = "",
     parameter CONV1_BIAS_FILE     = "",
     parameter CONV1_BN_SCALE_FILE = "",
     parameter CONV1_BN_SHIFT_FILE = "",
+    parameter CONV1_WP_FILE       = "",
+    parameter CONV1_WN_FILE       = "",
+
     parameter CONV2_WEIGHT_FILE   = "",
     parameter CONV2_BIAS_FILE     = "",
     parameter CONV2_BN_SCALE_FILE = "",
     parameter CONV2_BN_SHIFT_FILE = "",
+    parameter CONV2_WP_FILE       = "",
+    parameter CONV2_WN_FILE       = "",
+
     parameter CONV3_WEIGHT_FILE   = "",
     parameter CONV3_BIAS_FILE     = "",
     parameter CONV3_BN_SCALE_FILE = "",
     parameter CONV3_BN_SHIFT_FILE = "",
+    parameter CONV3_WP_FILE       = "",
+    parameter CONV3_WN_FILE       = "",
+
     parameter CONV4_WEIGHT_FILE   = "",
     parameter CONV4_BIAS_FILE     = "",
     parameter CONV4_BN_SCALE_FILE = "",
     parameter CONV4_BN_SHIFT_FILE = "",
+    parameter CONV4_WP_FILE       = "",
+    parameter CONV4_WN_FILE       = "",
 
     // FC bias/BN file paths
     parameter FC1_BIAS_FILE       = "",
     parameter FC2_BIAS_FILE       = "",
     parameter FC1_BN_SCALE_FILE   = "",
     parameter FC1_BN_SHIFT_FILE   = "",
+
+    // FC TTQ scaling factors
+    parameter FC1_WP_FILE         = "",
+    parameter FC1_WN_FILE         = "",
+    parameter FC2_WP_FILE         = "",
+    parameter FC2_WN_FILE         = "",
+
+    // DAAP activation threshold file paths
+    parameter CONV1_ACT_THRESH_FILE = "",
+    parameter CONV2_ACT_THRESH_FILE = "",
+    parameter CONV3_ACT_THRESH_FILE = "",
+    parameter CONV4_ACT_THRESH_FILE = "",
+    parameter FC1_ACT_THRESH_FILE   = "",
+    parameter FC2_ACT_THRESH_FILE   = "",
+
+
 
     // Input image file path
     parameter DATA_IN_FILE        = ""
@@ -132,13 +163,6 @@
 
     // ==================================================================
     //  Ping-Pong Feature Map BRAMs
-    //  Two buffers, 8192 × 32-bit each = 8 BRAM36 each = 16 BRAM36 total
-    //
-    //  Phase 0 (Conv1): read A → write B
-    //  Phase 1 (Conv2): read B → write A
-    //  Phase 2 (Conv3): read A → write B
-    //  Phase 3 (Conv4): read B → write A
-    //  Phase 4 (GAP):   read A
     // ==================================================================
     (* ram_style = "block" *) reg signed [BITS:0] fmap_a [0 : FMAP_BUF_SIZE - 1];
     (* ram_style = "block" *) reg signed [BITS:0] fmap_b [0 : FMAP_BUF_SIZE - 1];
@@ -147,12 +171,12 @@
     initial $readmemh(DATA_IN_FILE, fmap_a);
 
     // ==================================================================
-    //  Phase tracking
-    //  Advances when each layer's done signal fires.
+    //  Phase tracking (0..7)
     // ==================================================================
-    reg [2:0] phase;  // 0..4
+    reg [2:0] phase;
 
     wire pool1_done, pool2_done, conv3_done, conv4_done, gap_done;
+    wire mask_gen1_done, mask_gen2_done, mask_gen3_done;
 
     always @(posedge clk) begin
         if (!rstn)
@@ -160,11 +184,28 @@
         else begin
             case (phase)
                 3'd0: if (pool1_done) phase <= 3'd1;
-                3'd1: if (pool2_done) phase <= 3'd2;
-                3'd2: if (conv3_done) phase <= 3'd3;
-                3'd3: if (conv4_done) phase <= 3'd4;
-                default: ;  // Phase 4 (GAP/FC) stays
+                3'd1: if (mask_gen1_done) phase <= 3'd2;
+                3'd2: if (pool2_done) phase <= 3'd3;
+                3'd3: if (mask_gen2_done) phase <= 3'd4;
+                3'd4: if (conv3_done) phase <= 3'd5;
+                3'd5: if (mask_gen3_done) phase <= 3'd6;
+                3'd6: if (conv4_done) phase <= 3'd7;
+                default: ;
             endcase
+        end
+    end
+
+    // Start triggers for mask generators
+    reg mask_gen1_start, mask_gen2_start, mask_gen3_start;
+    always @(posedge clk) begin
+        if (!rstn) begin
+            mask_gen1_start <= 1'b0;
+            mask_gen2_start <= 1'b0;
+            mask_gen3_start <= 1'b0;
+        end else begin
+            mask_gen1_start <= (phase == 3'd0 && pool1_done);
+            mask_gen2_start <= (phase == 3'd2 && pool2_done);
+            mask_gen3_start <= (phase == 3'd4 && conv3_done);
         end
     end
 
@@ -178,34 +219,38 @@
 
     wire [31:0]          gap_rd_addr;
 
-    // Read data wires — directly connected to BRAM output registers
+    // Mask generator read addresses
+    wire [31:0]          mask_gen1_rd_addr, mask_gen2_rd_addr, mask_gen3_rd_addr;
+
+    // Read data wires
     reg signed [BITS:0]  fmap_a_rd_data, fmap_b_rd_data;
 
     // ==================================================================
-    //  BRAM A — Read address MUX (even phases read A)
+    //  BRAM A — Read address MUX
     // ==================================================================
     reg [31:0] bram_a_rd_addr;
     always @(*) begin
         case (phase)
-            3'd0:    bram_a_rd_addr = conv1_rd_addr;  // Conv1 reads input
-            3'd2:    bram_a_rd_addr = conv3_rd_addr;  // Conv3 reads pool2
-            3'd4:    bram_a_rd_addr = gap_rd_addr;    // GAP reads conv4
+            3'd0: bram_a_rd_addr = conv1_rd_addr;
+            3'd3: bram_a_rd_addr = mask_gen2_rd_addr;  // Mask Gen 2 reads BRAM A (Pool2)
+            3'd4: bram_a_rd_addr = conv3_rd_addr;
+            3'd7: bram_a_rd_addr = gap_rd_addr;
             default: bram_a_rd_addr = 0;
         endcase
     end
 
-    // BRAM A — Write MUX (odd phases write A)
+    // BRAM A — Write MUX (even write phases write A)
     reg [31:0]          bram_a_wr_addr;
     reg signed [BITS:0] bram_a_wr_data;
     reg                 bram_a_wr_en;
     always @(*) begin
         case (phase)
-            3'd1: begin
+            3'd2: begin // Phase 2: Conv2 writes to A (Pool2)
                 bram_a_wr_addr = conv2_wr_addr;
                 bram_a_wr_data = conv2_wr_data;
                 bram_a_wr_en   = conv2_wr_en;
             end
-            3'd3: begin
+            3'd6: begin // Phase 6: Conv4 writes to A (Conv4)
                 bram_a_wr_addr = conv4_wr_addr;
                 bram_a_wr_data = conv4_wr_data;
                 bram_a_wr_en   = conv4_wr_en;
@@ -226,29 +271,31 @@
     end
 
     // ==================================================================
-    //  BRAM B — Read address MUX (odd phases read B)
+    //  BRAM B — Read address MUX
     // ==================================================================
     reg [31:0] bram_b_rd_addr;
     always @(*) begin
         case (phase)
-            3'd1:    bram_b_rd_addr = conv2_rd_addr;  // Conv2 reads pool1
-            3'd3:    bram_b_rd_addr = conv4_rd_addr;  // Conv4 reads conv3
+            3'd1:    bram_b_rd_addr = mask_gen1_rd_addr; // Mask Gen 1 reads BRAM B (Pool1)
+            3'd2:    bram_b_rd_addr = conv2_rd_addr;
+            3'd5:    bram_b_rd_addr = mask_gen3_rd_addr; // Mask Gen 3 reads BRAM B (Conv3)
+            3'd6:    bram_b_rd_addr = conv4_rd_addr;
             default: bram_b_rd_addr = 0;
         endcase
     end
 
-    // BRAM B — Write MUX (even phases write B)
+    // BRAM B — Write MUX (odd write phases write B)
     reg [31:0]          bram_b_wr_addr;
     reg signed [BITS:0] bram_b_wr_data;
     reg                 bram_b_wr_en;
     always @(*) begin
         case (phase)
-            3'd0: begin
+            3'd0: begin // Phase 0: Conv1 writes to B (Pool1)
                 bram_b_wr_addr = conv1_wr_addr;
                 bram_b_wr_data = conv1_wr_data;
                 bram_b_wr_en   = conv1_wr_en;
             end
-            3'd2: begin
+            3'd4: begin // Phase 4: Conv3 writes to B (Conv3)
                 bram_b_wr_addr = conv3_wr_addr;
                 bram_b_wr_data = conv3_wr_data;
                 bram_b_wr_en   = conv3_wr_en;
@@ -269,18 +316,16 @@
     end
 
     // ==================================================================
-    //  Read data routing — each conv module gets data from its BRAM
-    //  Even phases (Conv1, Conv3, GAP) read from BRAM A
-    //  Odd phases  (Conv2, Conv4)      read from BRAM B
+    //  Read data routing
     // ==================================================================
-    wire signed [BITS:0] conv1_rd_data = fmap_a_rd_data;  // Phase 0: reads A
-    wire signed [BITS:0] conv2_rd_data = fmap_b_rd_data;  // Phase 1: reads B
-    wire signed [BITS:0] conv3_rd_data = fmap_a_rd_data;  // Phase 2: reads A
-    wire signed [BITS:0] conv4_rd_data = fmap_b_rd_data;  // Phase 3: reads B
-    wire signed [BITS:0] gap_rd_data   = fmap_a_rd_data;  // Phase 4: reads A
+    wire signed [BITS:0] conv1_rd_data = fmap_a_rd_data;
+    wire signed [BITS:0] conv2_rd_data = fmap_b_rd_data;
+    wire signed [BITS:0] conv3_rd_data = fmap_a_rd_data;
+    wire signed [BITS:0] conv4_rd_data = fmap_b_rd_data;
+    wire signed [BITS:0] gap_rd_data   = fmap_a_rd_data;
 
     // ==================================================================
-    //  GAP output + FC wires (small arrays — fine as FFs)
+    //  GAP output + FC wires
     // ==================================================================
     wire signed [BITS:0] gap_out [0 : GAP_OUT - 1];
 
@@ -301,7 +346,9 @@
         end
     endgenerate
 
-    // FC1 bias + BN ROMs (forced distributed — saves BRAM)
+    // ==================================================================
+    //  FC1 bias + BN ROMs (forced distributed)
+    // ==================================================================
     (* ram_style = "distributed" *) reg signed [31:0] fc1_b_rom [0 : FC1_OUT - 1];
     (* ram_style = "distributed" *) reg signed [31:0] fc1_bns_rom [0 : FC1_OUT - 1];
     (* ram_style = "distributed" *) reg signed [31:0] fc1_bnsh_rom [0 : FC1_OUT - 1];
@@ -313,11 +360,88 @@
     (* ram_style = "distributed" *) reg signed [31:0] fc2_b_rom [0 : FC2_OUT - 1];
     initial $readmemh(FC2_BIAS_FILE, fc2_b_rom);
 
+    // ==================================================================
+    //  FC Wp/Wn scalar ROMs
+    // ==================================================================
+    reg signed [31:0] fc1_wp_arr [0:0];
+    reg signed [31:0] fc1_wn_arr [0:0];
+    reg signed [31:0] fc2_wp_arr [0:0];
+    reg signed [31:0] fc2_wn_arr [0:0];
+    initial $readmemh(FC1_WP_FILE, fc1_wp_arr);
+    initial $readmemh(FC1_WN_FILE, fc1_wn_arr);
+    initial $readmemh(FC2_WP_FILE, fc2_wp_arr);
+    initial $readmemh(FC2_WN_FILE, fc2_wn_arr);
+    wire signed [31:0] fc1_wp = fc1_wp_arr[0];
+    wire signed [31:0] fc1_wn = fc1_wn_arr[0];
+    wire signed [31:0] fc2_wp = fc2_wp_arr[0];
+    wire signed [31:0] fc2_wn = fc2_wn_arr[0];
+
+    // ==================================================================
+    //  Threshold Mask Outputs
+    // ==================================================================
+    wire [POOL1_SIZE_T-1:0] mask1_vector;
+    wire [POOL2_SIZE_T-1:0] mask2_vector;
+    wire [CONV3_SIZE-1:0]   mask3_vector;
+
+    // ==================================================================
+    //  Instantiate Mask Generators
+    // ==================================================================
+    act_mask_gen_thresh #(
+        .IN_H       (16),
+        .IN_W       (16),
+        .IN_CH      (32),
+        .BITS       (BITS),
+        .LOG2_HW    (8),
+        .THRESH_FILE(CONV1_ACT_THRESH_FILE)
+    ) u_mask_gen_1 (
+        .clk         (clk),
+        .rstn        (rstn),
+        .start       (mask_gen1_start),
+        .bram_rd_addr(mask_gen1_rd_addr),
+        .bram_rd_data(fmap_b_rd_data), // reads from BRAM B (Pool1 output)
+        .mask_out    (mask1_vector),
+        .done        (mask_gen1_done)
+    );
+
+    act_mask_gen_thresh #(
+        .IN_H       (8),
+        .IN_W       (8),
+        .IN_CH      (64),
+        .BITS       (BITS),
+        .LOG2_HW    (6),
+        .THRESH_FILE(CONV2_ACT_THRESH_FILE)
+    ) u_mask_gen_2 (
+        .clk         (clk),
+        .rstn        (rstn),
+        .start       (mask_gen2_start),
+        .bram_rd_addr(mask_gen2_rd_addr),
+        .bram_rd_data(fmap_a_rd_data), // reads from BRAM A (Pool2 output)
+        .mask_out    (mask2_vector),
+        .done        (mask_gen2_done)
+    );
+
+    act_mask_gen_thresh #(
+        .IN_H       (8),
+        .IN_W       (8),
+        .IN_CH      (64),
+        .BITS       (BITS),
+        .LOG2_HW    (6),
+        .THRESH_FILE(CONV3_ACT_THRESH_FILE)
+    ) u_mask_gen_3 (
+        .clk         (clk),
+        .rstn        (rstn),
+        .start       (mask_gen3_start),
+        .bram_rd_addr(mask_gen3_rd_addr),
+        .bram_rd_data(fmap_b_rd_data), // reads from BRAM B (Conv3 output)
+        .mask_out    (mask3_vector),
+        .done        (mask_gen3_done)
+    );
 
     // ==================================================================
     //  Conv1 + BN1 + Pool1: 32×32×3 → 32×32×32 → BN → ReLU → 16×16×32
+    //  (no input mask applied — pass constant 1s)
     // ==================================================================
-    conv_pool_2d_cifar #(
+    conv_pool_2d_cifar_ttq #(
         .IN_H        (INPUT_H),
         .IN_W        (INPUT_W),
         .IN_CH       (INPUT_CH),
@@ -330,14 +454,19 @@
         .HAS_POOL    (1),
         .PARALLEL_CH (PARALLEL_CH),
         .BITS        (BITS),
+        .MASK_SIZE   (DATA_IN_SIZE),
         .WEIGHT_FILE  (CONV1_WEIGHT_FILE),
         .BIAS_FILE    (CONV1_BIAS_FILE),
         .BN_SCALE_FILE(CONV1_BN_SCALE_FILE),
-        .BN_SHIFT_FILE(CONV1_BN_SHIFT_FILE)
+        .BN_SHIFT_FILE(CONV1_BN_SHIFT_FILE),
+        .WP_FILE      (CONV1_WP_FILE),
+        .WN_FILE      (CONV1_WN_FILE),
+        .ACT_THRESH_FILE(CONV1_ACT_THRESH_FILE)
     ) u_conv_pool_1 (
         .clk                (clk),
         .rstn               (rstn),
         .activation_function(1'b1),
+        .act_mask           ({(DATA_IN_SIZE){1'b1}}),
         .fm_rd_addr         (conv1_rd_addr),
         .fm_rd_data         (conv1_rd_data),
         .fm_wr_addr         (conv1_wr_addr),
@@ -349,8 +478,9 @@
 
     // ==================================================================
     //  Conv2 + BN2 + Pool2: 16×16×32 → 16×16×64 → BN → ReLU → 8×8×64
+    //  (uses mask1_vector)
     // ==================================================================
-    conv_pool_2d_cifar #(
+    conv_pool_2d_cifar_ttq #(
         .IN_H        (POOL1_OUT_H),
         .IN_W        (POOL1_OUT_W),
         .IN_CH       (CONV2_IN_CH),
@@ -363,14 +493,19 @@
         .HAS_POOL    (1),
         .PARALLEL_CH (PARALLEL_CH),
         .BITS        (BITS),
+        .MASK_SIZE   (POOL1_SIZE_T),
         .WEIGHT_FILE  (CONV2_WEIGHT_FILE),
         .BIAS_FILE    (CONV2_BIAS_FILE),
         .BN_SCALE_FILE(CONV2_BN_SCALE_FILE),
-        .BN_SHIFT_FILE(CONV2_BN_SHIFT_FILE)
+        .BN_SHIFT_FILE(CONV2_BN_SHIFT_FILE),
+        .WP_FILE      (CONV2_WP_FILE),
+        .WN_FILE      (CONV2_WN_FILE),
+        .ACT_THRESH_FILE(CONV2_ACT_THRESH_FILE)
     ) u_conv_pool_2 (
         .clk                (clk),
-        .rstn               (pool1_done),
+        .rstn               (phase >= 3'd2),
         .activation_function(1'b1),
+        .act_mask           (mask1_vector),
         .fm_rd_addr         (conv2_rd_addr),
         .fm_rd_data         (conv2_rd_data),
         .fm_wr_addr         (conv2_wr_addr),
@@ -382,8 +517,9 @@
 
     // ==================================================================
     //  Conv3 + BN3 (no pool): 8×8×64 → 8×8×64 → BN → ReLU → 8×8×64
+    //  (uses mask2_vector)
     // ==================================================================
-    conv_pool_2d_cifar #(
+    conv_pool_2d_cifar_ttq #(
         .IN_H        (POOL2_OUT_H),
         .IN_W        (POOL2_OUT_W),
         .IN_CH       (CONV3_IN_CH),
@@ -396,14 +532,19 @@
         .HAS_POOL    (0),
         .PARALLEL_CH (PARALLEL_CH),
         .BITS        (BITS),
+        .MASK_SIZE   (POOL2_SIZE_T),
         .WEIGHT_FILE  (CONV3_WEIGHT_FILE),
         .BIAS_FILE    (CONV3_BIAS_FILE),
         .BN_SCALE_FILE(CONV3_BN_SCALE_FILE),
-        .BN_SHIFT_FILE(CONV3_BN_SHIFT_FILE)
+        .BN_SHIFT_FILE(CONV3_BN_SHIFT_FILE),
+        .WP_FILE      (CONV3_WP_FILE),
+        .WN_FILE      (CONV3_WN_FILE),
+        .ACT_THRESH_FILE(CONV3_ACT_THRESH_FILE)
     ) u_conv_3 (
         .clk                (clk),
-        .rstn               (pool2_done),
+        .rstn               (phase >= 3'd4),
         .activation_function(1'b1),
+        .act_mask           (mask2_vector),
         .fm_rd_addr         (conv3_rd_addr),
         .fm_rd_data         (conv3_rd_data),
         .fm_wr_addr         (conv3_wr_addr),
@@ -415,8 +556,9 @@
 
     // ==================================================================
     //  Conv4 + BN4 (no pool): 8×8×64 → 8×8×64 → BN → ReLU → 8×8×64
+    //  (uses mask3_vector)
     // ==================================================================
-    conv_pool_2d_cifar #(
+    conv_pool_2d_cifar_ttq #(
         .IN_H        (CONV3_OUT_H),
         .IN_W        (CONV3_OUT_W),
         .IN_CH       (CONV4_IN_CH),
@@ -429,14 +571,19 @@
         .HAS_POOL    (0),
         .PARALLEL_CH (PARALLEL_CH),
         .BITS        (BITS),
+        .MASK_SIZE   (CONV3_SIZE),
         .WEIGHT_FILE  (CONV4_WEIGHT_FILE),
         .BIAS_FILE    (CONV4_BIAS_FILE),
         .BN_SCALE_FILE(CONV4_BN_SCALE_FILE),
-        .BN_SHIFT_FILE(CONV4_BN_SHIFT_FILE)
+        .BN_SHIFT_FILE(CONV4_BN_SHIFT_FILE),
+        .WP_FILE      (CONV4_WP_FILE),
+        .WN_FILE      (CONV4_WN_FILE),
+        .ACT_THRESH_FILE(CONV4_ACT_THRESH_FILE)
     ) u_conv_4 (
         .clk                (clk),
-        .rstn               (conv3_done),
+        .rstn               (phase >= 3'd6),
         .activation_function(1'b1),
+        .act_mask           (mask3_vector),
         .fm_rd_addr         (conv4_rd_addr),
         .fm_rd_data         (conv4_rd_data),
         .fm_wr_addr         (conv4_wr_addr),
@@ -457,7 +604,7 @@
         .BITS      (BITS)
     ) u_gap (
         .clk        (clk),
-        .rstn       (conv4_done),
+        .rstn       (phase >= 3'd7 && conv4_done),
         .fm_rd_addr (gap_rd_addr),
         .fm_rd_data (gap_rd_data),
         .data_out   (gap_out),
@@ -481,22 +628,25 @@
 
 
     // ==================================================================
-    //  FC1: 64 → 256, BN5 + ReLU (weights in BRAM)
+    //  FC1: 64 → 256, BN5 + ReLU (TTQ weights + threshold)
     // ==================================================================
-    layer_seq_cifar #(
+    layer_seq_cifar_ttq #(
         .NUM_NEURONS       (FC1_OUT),
         .LAYER_NEURON_WIDTH(FC1_WIDTH),
         .LAYER_BITS        (BITS),
         .B_BITS            (31),
         .HAS_BN            (1),
-        .FORCE_BRAM        (1),       // FC1: 26,624 weights → BRAM
-        .WEIGHT_FILE       (FC1_WEIGHT_FILE)
+        .FORCE_BRAM        (0),
+        .WEIGHT_FILE       (FC1_WEIGHT_FILE),
+        .ACT_THRESH_FILE   (FC1_ACT_THRESH_FILE)
     ) u_fc1 (
         .clk                (clk),
-        .rstn               (gap_done),
+        .rstn               (phase >= 3'd7 && gap_done),
         .activation_function(1'b1),
         .b                  (fc1_b_rom),
         .data_in            (fc1_in),
+        .wp                 (fc1_wp),
+        .wn                 (fc1_wn),
         .bn_scale           (fc1_bns_rom),
         .bn_shift           (fc1_bnsh_rom),
         .data_out           (fc1_out_raw),
@@ -519,25 +669,27 @@
 
 
     // ==================================================================
-    //  FC2: 256 → 10, no activation, no BN (raw logits)
-    //  Weights in distributed RAM (2,960 entries → ~1,480 LUTs, saves 3 BRAM36)
+    //  FC2: 256 → 10, no activation, no BN (TTQ weights + threshold)
     // ==================================================================
     localparam FC2_BITS = BITS + 8;
 
-    layer_seq_cifar #(
+    layer_seq_cifar_ttq #(
         .NUM_NEURONS       (FC2_OUT),
         .LAYER_NEURON_WIDTH(FC2_WIDTH),
         .LAYER_BITS        (FC2_BITS),
         .B_BITS            (31),
         .HAS_BN            (0),
-        .FORCE_BRAM        (0),       // FC2: 2,960 weights → distributed RAM
-        .WEIGHT_FILE       (FC2_WEIGHT_FILE)
+        .FORCE_BRAM        (0),
+        .WEIGHT_FILE       (FC2_WEIGHT_FILE),
+        .ACT_THRESH_FILE   (FC2_ACT_THRESH_FILE)
     ) u_fc2 (
         .clk                (clk),
-        .rstn               (fc1_done),
+        .rstn               (phase >= 3'd7 && fc1_done),
         .activation_function(1'b0),
         .b                  (fc2_b_rom),
         .data_in            (fc2_in),
+        .wp                 (fc2_wp),
+        .wn                 (fc2_wn),
         .bn_scale           (fc2_bn_scale_dummy),
         .bn_shift           (fc2_bn_shift_dummy),
         .data_out           (cnn_out),

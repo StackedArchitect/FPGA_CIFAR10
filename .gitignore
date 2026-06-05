@@ -16,3 +16,20 @@ cifar10_dataset/
 *.xlsx
 *.lnk
 desktop.ini
+# Vivado build artifacts
+xsim.dir/
+.Xil/
+*.jou
+*.log
+*.pb
+*.dcp
+vivado.log
+vivado.jou
+webtalk*
+xsim_*.backup.jou
+xsim_*.backup.log
+
+# Python cache
+__pycache__/
+*.pyc
+

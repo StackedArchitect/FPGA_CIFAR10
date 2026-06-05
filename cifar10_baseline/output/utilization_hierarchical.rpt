@@ -1,0 +1,38 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2024 Advanced Micro Devices, Inc. All Rights Reserved.
+-------------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2024.2 (win64) Build 5239630 Fri Nov 08 22:35:27 MST 2024
+| Date         : Mon May 25 14:33:18 2026
+| Host         : DESKTOP-EK3KMT5 running 64-bit major release  (build 9200)
+| Command      : report_utilization -hierarchical -file C:/Users/ADMIN/Desktop/FPGA_CIFAR10/cifar10_baseline/output/utilization_hierarchical.rpt
+| Design       : cnn2d_synth_top_cifar
+| Device       : xc7z020clg484-1
+| Speed File   : -1
+| Design State : Synthesized
+-------------------------------------------------------------------------------------------------------------------------------------------------
+
+Utilization Design Information
+
+Table of Contents
+-----------------
+1. Utilization by Hierarchy
+
+1. Utilization by Hierarchy
+---------------------------
+
++---------------------------+------------------------------------+------------+------------+---------+------+-------+--------+--------+------------+
+|          Instance         |               Module               | Total LUTs | Logic LUTs | LUTRAMs | SRLs |  FFs  | RAMB36 | RAMB18 | DSP Blocks |
++---------------------------+------------------------------------+------------+------------+---------+------+-------+--------+--------+------------+
+| cnn2d_synth_top_cifar     |                              (top) |      70830 |      70830 |       0 |    0 | 15593 |     53 |      0 |         88 |
+|   (cnn2d_synth_top_cifar) |                              (top) |        625 |        625 |       0 |    0 |     4 |      0 |      0 |          0 |
+|   u_dut                   |                    cnn2d_top_cifar |      70205 |      70205 |       0 |    0 | 15589 |     53 |      0 |         88 |
+|     (u_dut)               |                    cnn2d_top_cifar |        127 |        127 |       0 |    0 |     3 |     16 |      0 |          0 |
+|     u_conv_3              | conv_pool_2d_cifar__parameterized1 |      22039 |      22039 |       0 |    0 |   469 |      0 |      0 |         18 |
+|     u_conv_4              | conv_pool_2d_cifar__parameterized2 |      21179 |      21179 |       0 |    0 |   469 |      0 |      0 |         18 |
+|     u_conv_pool_1         |                 conv_pool_2d_cifar |       1635 |       1635 |       0 |    0 |   648 |      4 |      0 |         20 |
+|     u_conv_pool_2         | conv_pool_2d_cifar__parameterized0 |      12159 |      12159 |       0 |    0 |   650 |      1 |      0 |         20 |
+|     u_fc1                 |                    layer_seq_cifar |       8183 |       8183 |       0 |    0 | 10442 |     32 |      0 |          8 |
+|     u_fc2                 |    layer_seq_cifar__parameterized0 |       4589 |       4589 |       0 |    0 |   752 |      0 |      0 |          4 |
+|     u_gap                 |              global_avg_pool_cifar |        294 |        294 |       0 |    0 |  2156 |      0 |      0 |          0 |
++---------------------------+------------------------------------+------------+------------+---------+------+-------+--------+--------+------------+
+
+

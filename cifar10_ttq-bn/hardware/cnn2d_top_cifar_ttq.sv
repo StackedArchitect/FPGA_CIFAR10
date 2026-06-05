@@ -1,29 +1,30 @@
 `timescale 1ns / 1ps
 //============================================================================
-// CNN 2D Top — CIFAR-10 (Ping-Pong BRAM Feature Maps)
+// CNN 2D Top — CIFAR-10 TTQ + BatchNorm (Ping-Pong BRAM Feature Maps)
 //
-// Architecture:
+// Architecture (identical to baseline):
 //   Conv1(3→32, pad=1) → BN1 → Pool1
 //   Conv2(32→64, pad=1) → BN2 → Pool2
 //   Conv3(64→64, pad=1) → BN3 (no pool)
 //   Conv4(64→64, pad=1) → BN4 (no pool)
 //   GAP(8×8→1×1) → FC1(64→256) → BN5 → FC2(256→10)
 //
-// BRAM Strategy — Ping-Pong:
-//   Only 2 feature map BRAMs (A and B), each 8192 × 32-bit (8 BRAM36).
-//   Layers alternate between reading A/writing B and reading B/writing A.
+// TTQ Changes vs Baseline:
+//   • Instantiates conv_pool_2d_cifar_ttq (2-bit weights, split accumulators)
+//   • Instantiates layer_seq_cifar_ttq (2-bit weights, S_SCALE state)
+//   • Loads Wp/Wn scalars from .mem files for each layer
+//   • GAP module unchanged (operates on activations)
 //
+// BRAM Strategy — Ping-Pong (unchanged):
 //   Phase 0 (Conv1): read A (input)  → write B (pool1)
 //   Phase 1 (Conv2): read B (pool1)  → write A (pool2)
 //   Phase 2 (Conv3): read A (pool2)  → write B (conv3)
 //   Phase 3 (Conv4): read B (conv3)  → write A (conv4)
 //   Phase 4 (GAP):   read A (conv4)
 //
-// Total BRAM36: 116 (weights) + 16 (ping-pong) + 5 (conv_buf) = 137 / 140
-//
 // Target: XC7Z020CLG484-1 @ 40 MHz
 //============================================================================
-(* KEEP_HIERARCHY = "yes" *) module cnn2d_top_cifar #(
+(* KEEP_HIERARCHY = "yes" *) module cnn2d_top_cifar_ttq #(
     // ---- Input ----
     parameter INPUT_H         = 32,
     parameter INPUT_W         = 32,
@@ -74,39 +75,56 @@
     parameter FC1_WIDTH       = PAD + FC1_IN + PAD - 1,
     parameter FC2_WIDTH       = PAD + FC1_OUT + PAD - 1,
 
-    // Parallelism — 4 filters per group (fits BRAM budget)
+    // Parallelism — 4 filters per group
     parameter PARALLEL_CH     = 4,
 
     // Bit widths
     parameter BITS            = 31,
 
-    // Weight file paths for FC layers
+    // Weight file paths for FC layers (ternary codes)
     parameter FC1_WEIGHT_FILE = "",
     parameter FC2_WEIGHT_FILE = "",
 
-    // Weight/BN file paths for all Conv layers
+    // Conv weight file paths (ternary codes)
     parameter CONV1_WEIGHT_FILE   = "",
     parameter CONV1_BIAS_FILE     = "",
     parameter CONV1_BN_SCALE_FILE = "",
     parameter CONV1_BN_SHIFT_FILE = "",
+    parameter CONV1_WP_FILE       = "",
+    parameter CONV1_WN_FILE       = "",
+
     parameter CONV2_WEIGHT_FILE   = "",
     parameter CONV2_BIAS_FILE     = "",
     parameter CONV2_BN_SCALE_FILE = "",
     parameter CONV2_BN_SHIFT_FILE = "",
+    parameter CONV2_WP_FILE       = "",
+    parameter CONV2_WN_FILE       = "",
+
     parameter CONV3_WEIGHT_FILE   = "",
     parameter CONV3_BIAS_FILE     = "",
     parameter CONV3_BN_SCALE_FILE = "",
     parameter CONV3_BN_SHIFT_FILE = "",
+    parameter CONV3_WP_FILE       = "",
+    parameter CONV3_WN_FILE       = "",
+
     parameter CONV4_WEIGHT_FILE   = "",
     parameter CONV4_BIAS_FILE     = "",
     parameter CONV4_BN_SCALE_FILE = "",
     parameter CONV4_BN_SHIFT_FILE = "",
+    parameter CONV4_WP_FILE       = "",
+    parameter CONV4_WN_FILE       = "",
 
     // FC bias/BN file paths
     parameter FC1_BIAS_FILE       = "",
     parameter FC2_BIAS_FILE       = "",
     parameter FC1_BN_SCALE_FILE   = "",
     parameter FC1_BN_SHIFT_FILE   = "",
+
+    // FC TTQ scaling factors
+    parameter FC1_WP_FILE         = "",
+    parameter FC1_WN_FILE         = "",
+    parameter FC2_WP_FILE         = "",
+    parameter FC2_WN_FILE         = "",
 
     // Input image file path
     parameter DATA_IN_FILE        = ""
@@ -133,12 +151,6 @@
     // ==================================================================
     //  Ping-Pong Feature Map BRAMs
     //  Two buffers, 8192 × 32-bit each = 8 BRAM36 each = 16 BRAM36 total
-    //
-    //  Phase 0 (Conv1): read A → write B
-    //  Phase 1 (Conv2): read B → write A
-    //  Phase 2 (Conv3): read A → write B
-    //  Phase 3 (Conv4): read B → write A
-    //  Phase 4 (GAP):   read A
     // ==================================================================
     (* ram_style = "block" *) reg signed [BITS:0] fmap_a [0 : FMAP_BUF_SIZE - 1];
     (* ram_style = "block" *) reg signed [BITS:0] fmap_b [0 : FMAP_BUF_SIZE - 1];
@@ -148,7 +160,6 @@
 
     // ==================================================================
     //  Phase tracking
-    //  Advances when each layer's done signal fires.
     // ==================================================================
     reg [2:0] phase;  // 0..4
 
@@ -163,7 +174,7 @@
                 3'd1: if (pool2_done) phase <= 3'd2;
                 3'd2: if (conv3_done) phase <= 3'd3;
                 3'd3: if (conv4_done) phase <= 3'd4;
-                default: ;  // Phase 4 (GAP/FC) stays
+                default: ;
             endcase
         end
     end
@@ -178,7 +189,7 @@
 
     wire [31:0]          gap_rd_addr;
 
-    // Read data wires — directly connected to BRAM output registers
+    // Read data wires
     reg signed [BITS:0]  fmap_a_rd_data, fmap_b_rd_data;
 
     // ==================================================================
@@ -187,9 +198,9 @@
     reg [31:0] bram_a_rd_addr;
     always @(*) begin
         case (phase)
-            3'd0:    bram_a_rd_addr = conv1_rd_addr;  // Conv1 reads input
-            3'd2:    bram_a_rd_addr = conv3_rd_addr;  // Conv3 reads pool2
-            3'd4:    bram_a_rd_addr = gap_rd_addr;    // GAP reads conv4
+            3'd0:    bram_a_rd_addr = conv1_rd_addr;
+            3'd2:    bram_a_rd_addr = conv3_rd_addr;
+            3'd4:    bram_a_rd_addr = gap_rd_addr;
             default: bram_a_rd_addr = 0;
         endcase
     end
@@ -231,8 +242,8 @@
     reg [31:0] bram_b_rd_addr;
     always @(*) begin
         case (phase)
-            3'd1:    bram_b_rd_addr = conv2_rd_addr;  // Conv2 reads pool1
-            3'd3:    bram_b_rd_addr = conv4_rd_addr;  // Conv4 reads conv3
+            3'd1:    bram_b_rd_addr = conv2_rd_addr;
+            3'd3:    bram_b_rd_addr = conv4_rd_addr;
             default: bram_b_rd_addr = 0;
         endcase
     end
@@ -269,18 +280,16 @@
     end
 
     // ==================================================================
-    //  Read data routing — each conv module gets data from its BRAM
-    //  Even phases (Conv1, Conv3, GAP) read from BRAM A
-    //  Odd phases  (Conv2, Conv4)      read from BRAM B
+    //  Read data routing
     // ==================================================================
-    wire signed [BITS:0] conv1_rd_data = fmap_a_rd_data;  // Phase 0: reads A
-    wire signed [BITS:0] conv2_rd_data = fmap_b_rd_data;  // Phase 1: reads B
-    wire signed [BITS:0] conv3_rd_data = fmap_a_rd_data;  // Phase 2: reads A
-    wire signed [BITS:0] conv4_rd_data = fmap_b_rd_data;  // Phase 3: reads B
-    wire signed [BITS:0] gap_rd_data   = fmap_a_rd_data;  // Phase 4: reads A
+    wire signed [BITS:0] conv1_rd_data = fmap_a_rd_data;
+    wire signed [BITS:0] conv2_rd_data = fmap_b_rd_data;
+    wire signed [BITS:0] conv3_rd_data = fmap_a_rd_data;
+    wire signed [BITS:0] conv4_rd_data = fmap_b_rd_data;
+    wire signed [BITS:0] gap_rd_data   = fmap_a_rd_data;
 
     // ==================================================================
-    //  GAP output + FC wires (small arrays — fine as FFs)
+    //  GAP output + FC wires
     // ==================================================================
     wire signed [BITS:0] gap_out [0 : GAP_OUT - 1];
 
@@ -301,7 +310,9 @@
         end
     endgenerate
 
-    // FC1 bias + BN ROMs (forced distributed — saves BRAM)
+    // ==================================================================
+    //  FC1 bias + BN ROMs (forced distributed)
+    // ==================================================================
     (* ram_style = "distributed" *) reg signed [31:0] fc1_b_rom [0 : FC1_OUT - 1];
     (* ram_style = "distributed" *) reg signed [31:0] fc1_bns_rom [0 : FC1_OUT - 1];
     (* ram_style = "distributed" *) reg signed [31:0] fc1_bnsh_rom [0 : FC1_OUT - 1];
@@ -313,11 +324,27 @@
     (* ram_style = "distributed" *) reg signed [31:0] fc2_b_rom [0 : FC2_OUT - 1];
     initial $readmemh(FC2_BIAS_FILE, fc2_b_rom);
 
+    // ==================================================================
+    //  FC Wp/Wn scalar ROMs
+    // ==================================================================
+    reg signed [31:0] fc1_wp_arr [0:0];
+    reg signed [31:0] fc1_wn_arr [0:0];
+    reg signed [31:0] fc2_wp_arr [0:0];
+    reg signed [31:0] fc2_wn_arr [0:0];
+    initial $readmemh(FC1_WP_FILE, fc1_wp_arr);
+    initial $readmemh(FC1_WN_FILE, fc1_wn_arr);
+    initial $readmemh(FC2_WP_FILE, fc2_wp_arr);
+    initial $readmemh(FC2_WN_FILE, fc2_wn_arr);
+    wire signed [31:0] fc1_wp = fc1_wp_arr[0];
+    wire signed [31:0] fc1_wn = fc1_wn_arr[0];
+    wire signed [31:0] fc2_wp = fc2_wp_arr[0];
+    wire signed [31:0] fc2_wn = fc2_wn_arr[0];
+
 
     // ==================================================================
     //  Conv1 + BN1 + Pool1: 32×32×3 → 32×32×32 → BN → ReLU → 16×16×32
     // ==================================================================
-    conv_pool_2d_cifar #(
+    conv_pool_2d_cifar_ttq #(
         .IN_H        (INPUT_H),
         .IN_W        (INPUT_W),
         .IN_CH       (INPUT_CH),
@@ -333,7 +360,9 @@
         .WEIGHT_FILE  (CONV1_WEIGHT_FILE),
         .BIAS_FILE    (CONV1_BIAS_FILE),
         .BN_SCALE_FILE(CONV1_BN_SCALE_FILE),
-        .BN_SHIFT_FILE(CONV1_BN_SHIFT_FILE)
+        .BN_SHIFT_FILE(CONV1_BN_SHIFT_FILE),
+        .WP_FILE      (CONV1_WP_FILE),
+        .WN_FILE      (CONV1_WN_FILE)
     ) u_conv_pool_1 (
         .clk                (clk),
         .rstn               (rstn),
@@ -350,7 +379,7 @@
     // ==================================================================
     //  Conv2 + BN2 + Pool2: 16×16×32 → 16×16×64 → BN → ReLU → 8×8×64
     // ==================================================================
-    conv_pool_2d_cifar #(
+    conv_pool_2d_cifar_ttq #(
         .IN_H        (POOL1_OUT_H),
         .IN_W        (POOL1_OUT_W),
         .IN_CH       (CONV2_IN_CH),
@@ -366,7 +395,9 @@
         .WEIGHT_FILE  (CONV2_WEIGHT_FILE),
         .BIAS_FILE    (CONV2_BIAS_FILE),
         .BN_SCALE_FILE(CONV2_BN_SCALE_FILE),
-        .BN_SHIFT_FILE(CONV2_BN_SHIFT_FILE)
+        .BN_SHIFT_FILE(CONV2_BN_SHIFT_FILE),
+        .WP_FILE      (CONV2_WP_FILE),
+        .WN_FILE      (CONV2_WN_FILE)
     ) u_conv_pool_2 (
         .clk                (clk),
         .rstn               (pool1_done),
@@ -383,7 +414,7 @@
     // ==================================================================
     //  Conv3 + BN3 (no pool): 8×8×64 → 8×8×64 → BN → ReLU → 8×8×64
     // ==================================================================
-    conv_pool_2d_cifar #(
+    conv_pool_2d_cifar_ttq #(
         .IN_H        (POOL2_OUT_H),
         .IN_W        (POOL2_OUT_W),
         .IN_CH       (CONV3_IN_CH),
@@ -399,7 +430,9 @@
         .WEIGHT_FILE  (CONV3_WEIGHT_FILE),
         .BIAS_FILE    (CONV3_BIAS_FILE),
         .BN_SCALE_FILE(CONV3_BN_SCALE_FILE),
-        .BN_SHIFT_FILE(CONV3_BN_SHIFT_FILE)
+        .BN_SHIFT_FILE(CONV3_BN_SHIFT_FILE),
+        .WP_FILE      (CONV3_WP_FILE),
+        .WN_FILE      (CONV3_WN_FILE)
     ) u_conv_3 (
         .clk                (clk),
         .rstn               (pool2_done),
@@ -416,7 +449,7 @@
     // ==================================================================
     //  Conv4 + BN4 (no pool): 8×8×64 → 8×8×64 → BN → ReLU → 8×8×64
     // ==================================================================
-    conv_pool_2d_cifar #(
+    conv_pool_2d_cifar_ttq #(
         .IN_H        (CONV3_OUT_H),
         .IN_W        (CONV3_OUT_W),
         .IN_CH       (CONV4_IN_CH),
@@ -432,7 +465,9 @@
         .WEIGHT_FILE  (CONV4_WEIGHT_FILE),
         .BIAS_FILE    (CONV4_BIAS_FILE),
         .BN_SCALE_FILE(CONV4_BN_SCALE_FILE),
-        .BN_SHIFT_FILE(CONV4_BN_SHIFT_FILE)
+        .BN_SHIFT_FILE(CONV4_BN_SHIFT_FILE),
+        .WP_FILE      (CONV4_WP_FILE),
+        .WN_FILE      (CONV4_WN_FILE)
     ) u_conv_4 (
         .clk                (clk),
         .rstn               (conv3_done),
@@ -447,7 +482,7 @@
 
 
     // ==================================================================
-    //  Global Average Pool: 8×8×64 → 64
+    //  Global Average Pool: 8×8×64 → 64  (UNCHANGED from baseline)
     // ==================================================================
     global_avg_pool_cifar #(
         .IN_CH     (CONV4_OUT_CH),
@@ -481,15 +516,15 @@
 
 
     // ==================================================================
-    //  FC1: 64 → 256, BN5 + ReLU (weights in BRAM)
+    //  FC1: 64 → 256, BN5 + ReLU (TTQ weights)
     // ==================================================================
-    layer_seq_cifar #(
+    layer_seq_cifar_ttq #(
         .NUM_NEURONS       (FC1_OUT),
         .LAYER_NEURON_WIDTH(FC1_WIDTH),
         .LAYER_BITS        (BITS),
         .B_BITS            (31),
         .HAS_BN            (1),
-        .FORCE_BRAM        (1),       // FC1: 26,624 weights → BRAM
+        .FORCE_BRAM        (0),       // TTQ: 2-bit weights → distributed
         .WEIGHT_FILE       (FC1_WEIGHT_FILE)
     ) u_fc1 (
         .clk                (clk),
@@ -497,6 +532,8 @@
         .activation_function(1'b1),
         .b                  (fc1_b_rom),
         .data_in            (fc1_in),
+        .wp                 (fc1_wp),
+        .wn                 (fc1_wn),
         .bn_scale           (fc1_bns_rom),
         .bn_shift           (fc1_bnsh_rom),
         .data_out           (fc1_out_raw),
@@ -519,18 +556,17 @@
 
 
     // ==================================================================
-    //  FC2: 256 → 10, no activation, no BN (raw logits)
-    //  Weights in distributed RAM (2,960 entries → ~1,480 LUTs, saves 3 BRAM36)
+    //  FC2: 256 → 10, no activation, no BN (TTQ weights, raw logits)
     // ==================================================================
     localparam FC2_BITS = BITS + 8;
 
-    layer_seq_cifar #(
+    layer_seq_cifar_ttq #(
         .NUM_NEURONS       (FC2_OUT),
         .LAYER_NEURON_WIDTH(FC2_WIDTH),
         .LAYER_BITS        (FC2_BITS),
         .B_BITS            (31),
         .HAS_BN            (0),
-        .FORCE_BRAM        (0),       // FC2: 2,960 weights → distributed RAM
+        .FORCE_BRAM        (0),       // TTQ: 2-bit weights → distributed
         .WEIGHT_FILE       (FC2_WEIGHT_FILE)
     ) u_fc2 (
         .clk                (clk),
@@ -538,6 +574,8 @@
         .activation_function(1'b0),
         .b                  (fc2_b_rom),
         .data_in            (fc2_in),
+        .wp                 (fc2_wp),
+        .wn                 (fc2_wn),
         .bn_scale           (fc2_bn_scale_dummy),
         .bn_shift           (fc2_bn_shift_dummy),
         .data_out           (cnn_out),
