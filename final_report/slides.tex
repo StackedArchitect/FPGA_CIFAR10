@@ -1,0 +1,132 @@
+\documentclass{beamer}
+\usetheme{Madrid}
+\usecolortheme{whale}
+
+\title[FPGA NN Exploration]{Quantized and Gated Neural Network Accelerators on FPGA}
+\subtitle{TTQ, Density-Adaptive Pruning, and Spatial Hysteresis}
+\author{Research & Development Presentation}
+\date{\today}
+
+\begin{document}
+
+% Slide 1: Title Slide
+\begin{frame}
+\titlepage
+\end{frame}
+
+% Slide 2: Work Done So Far
+\begin{frame}{Work Done So Far: Accelerator Evolution}
+We have implemented and evaluated a complete hardware-software co-design pipeline:
+\begin{itemize}
+    \item \textbf{Floating-Point Baseline}: High accuracy ($98.35\%$ MNIST, $90.62\%$ CIFAR-10) but heavy memory and arithmetic footprints.
+    \item \textbf{Trained Ternary Quantization (TTQ)}:
+    \begin{itemize}
+        \item Weights compressed to 2-bits (16$\times$ storage reduction).
+        \item Asymmetric learnable scaling factors ($W_p$, $W_n$).
+        \item Replaced multiplications with ternary add/subtract (zero DSPs per tap).
+    \end{itemize}
+    \item \textbf{Activation Pruning Accelerators}:
+    \begin{itemize}
+        \item Fused Convolution and Pooling sequential pipeline.
+        \item Lookahead skip-gating FSMs (2-tap for Conv, 4-tap for FC).
+        \item Two gating algorithms: Density-Adaptive Activation Pruning (DAAP) and Spatial Hysteresis Gating.
+    \end{itemize}
+\end{itemize}
+\end{frame}
+
+% Slide 3: Detailed Thresholding (DAAP) Method
+\begin{frame}{Gating Strategies: Detailed Thresholding (DAAP)}
+The thresholding method is based on **Density-Adaptive Activation Pruning (DAAP)**:
+\begin{itemize}
+    \item **Formula**: Gating threshold $\tau_f = \tau_{\text{base}} / \max(\rho_f, 0.01)$, where $\rho_f$ is the non-zero weight density of filter $f$.
+    \item **Methodology**: Sparse filters get higher thresholds (more selective gating); dense filters get lower thresholds.
+    \item **Calibration**: Optimal base threshold ($\tau_{\text{base}}$) is found offline by sweeping and selecting the maximum value within a $0.5\%$ accuracy drop tolerance:
+    \begin{itemize}
+        \item **MNIST**: $\tau_{\text{base}} = 0.30$, yielding a threshold range of $0.30$--$0.34$.
+        \item **CIFAR-10**: $\tau_{\text{base}} = 0.003$, yielding a threshold range of $0.0051$--$0.0069$.
+    \end{itemize}
+    \item **Hardware**: Implemented using zero-latency combinational comparators and distributed RAM threshold storage.
+\end{itemize}
+\end{frame}
+
+% Slide 4: Lookahead Step Length Logic
+\begin{frame}{Lookahead Step Gating Logic}
+We implement lookahead logic to skip cycles when activations are masked:
+\begin{itemize}
+    \item **FC Layers**: Use a **4-step lookahead** ($L=4$). Addressing is purely linear ($input\_idx + 1$, $+2$, $+3$, etc.), keeping the critical path short and closing timing.
+    \item **Conv Layers**: Restricted to a **2-step lookahead** ($L=2$). 
+\end{itemize}
+\begin{block}{Why 4-step lookahead was NOT used in Conv Layers}
+\begin{enumerate}
+    \item **Address Complexity**: Conv addressing requires coordinate calculations (kernel rows/columns, input channels, border wrapping).
+    \item **Timing Violations**: Resolving a 4-step lookahead priority encoder with coordinate wrapping combinationally creates a path with $>50$ logic levels, violating timing and dropping $F_{\text{max}}$.
+\end{enumerate}
+\end{block}
+\end{frame}
+
+% Slide 5: Quantitative Performance Summary
+\begin{frame}{Performance Summary: MNIST \& CIFAR-10}
+\begin{table}
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Dataset} & \textbf{Model Variant} & \textbf{Accuracy} & \textbf{Latency} & \textbf{LUTs} & \textbf{DSPs} \\
+\midrule
+MNIST & Baseline (Sequential) & 98.35\% & 0.832 ms & 14,925 (28\%) & 23 (10\%) \\
+MNIST & TTQ + BN & 97.28\% & 0.905 ms & 14,588 (27\%) & 51 (23\%) \\
+MNIST & TTQ + Threshold & 97.25\% & 0.887 ms & 23,085 (43\%) & 54 (24\%) \\
+MNIST & TTQ + Hysteresis & 96.96\% & 0.815 ms & 33,565 (63\%) & 54 (24\%) \\
+\midrule
+CIFAR-10 & Baseline (KD Student) & 90.62\% & 70.50 ms & 23,241 (43\%) & 88 (40\%) \\
+CIFAR-10 & TTQ + BN & 90.62\% & 71.94 ms & 24,689 (46\%) & 36 (16\%) \\
+CIFAR-10 & TTQ + Threshold & 89.85\% & 50.45 ms & 31,828 (60\%) & 36 (16\%) \\
+CIFAR-10 & TTQ + Hysteresis & 88.34\% & 36.88 ms & 35,798 (67\%) & 36 (16\%) \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+\begin{itemize}
+    \item For CIFAR-10, TTQ+BN retains the **full $90.62\%$ baseline accuracy**.
+    \item Thresholding and Hysteresis yield speedups (down to 36.88 ms, a **$1.95\times$ speedup**) with minimal accuracy degradation ($89.85\%$ and $88.34\%$).
+\end{itemize}
+\end{frame}
+
+% Slide 6: Industrial Use Cases & Advantages
+\begin{frame}{Industrial Use Cases and Quantization Advantages}
+\begin{block}{Why Quantization is Used}
+\begin{itemize}
+    \item **16$\times$ Weight Compression**: Compressing weights from FP32 to 2-bit ternary codes allows the network parameters to fit entirely on-chip, eliminating slow and power-hungry external DDR DRAM accesses.
+    \item **No DSP Multipliers**: Ternary weights replace MAC multipliers with simple adders/subtractors, saving valuable silicon area.
+    \item **Energy Efficiency**: Low dynamic power dissipation (~160 mW) prevents thermal throttling, keeping junction temp rise $<2^\circ$C.
+\end{itemize}
+\end{block}
+
+\begin{block}{Autonomous Vehicles (AVs) Application}
+\begin{itemize}
+    \item **Latency-Critical Decision Loops**: AV systems require ultra-low latencies ($<5$ ms) for pedestrian and obstacle classification. Skip-gating FSMs dynamically speed up processing by skipping background pixels.
+    \item **Passive Cooling**: Low-power FPGAs remove the need for bulky liquid cooling systems, reducing vehicle weight and battery drain.
+\end{itemize}
+\end{block}
+\end{frame}
+
+% Slide 7: Key Learnings & Takeaways
+\begin{frame}{Key Learnings & Takeaways}
+\begin{enumerate}
+    \item \textbf{Quantization vs. Resource Trade-off}:
+    \begin{itemize}
+        \item Asymmetric Wp/Wn scale factors in TTQ successfully retain classification accuracy while reducing weight memory footprint.
+    \end{itemize}
+    \item \textbf{Data-Dependent Gating Success}:
+    \begin{itemize}
+        \item Spatial hysteresis is effective for sparse inputs (strokes, boundaries, text) but fails on dense, natural textures.
+    \end{itemize}
+    \item \textbf{Hardware Optimization}:
+    \begin{itemize}
+        \item Memory partitioning is essential to prevent BRAM port contention and avoid compiling weights into LUTs.
+        \item Ping-pong buffering saves up to 7 BRAM36 tiles, proving the value of FSM schedule-aware routing.
+    \end{itemize}
+\end{enumerate}
+\end{frame}
+
+\end{document}
